@@ -540,6 +540,11 @@ app.get("/evaluacion-desempenio-completas-p", passport.authenticate('jwt', { ses
             registros = registros.filter(r => r.empleado_evaluar.toLowerCase().includes(req.headers.busqueda.toLowerCase()))
         }
 
+        
+        // if(req.headers.empleado_id != "" && req.headers.empleado_id != null){
+        //     registros = registros.filter(r => r.empleado_id == req.headers.empleado_id)
+        // }
+
         result = {
             sectores: sectores,
             tipos: tipos,
@@ -890,6 +895,137 @@ app.get("/lockers", passport.authenticate('jwt', { session: false }), async(req,
     }
 })
 
+/* SECCION DETALLADA DE EMPLEADOS */
+
+app.get("/empleado-detalle", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    try {
+        const allDatas = await pool.query("SELECT * FROM web.v_intranet_empleado_detalle where id = $1", [req.headers.empleado_id])
+        res.json(allDatas.rows)
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+app.get("/legajos-empleados", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    try {
+        const allDatas = await pool.query("SELECT empleado_id, empleado, legajo, puesto, image FROM web.v_intranet_plan_capacitacion_empleados group by 1,2,3,4,5")
+        
+        let data = allDatas.rows;
+        let busqueda = req.headers.busqueda;
+
+        if (busqueda !== ""){
+            data = data.filter(item =>
+                (item.empleado && item.empleado.toLowerCase().includes(busqueda))
+            );
+        }        
+        
+        res.json(data)
+
+
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+app.get("/empleado-puesto", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    try {
+        const allDatas = await pool.query("SELECT puesto_pdf as puesto FROM web.v_intranet_puestos_empleados where empleado_id = $1",[req.headers.empleado_id])
+        res.json(allDatas.rows)
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+app.get("/empleado-cuestionarios", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    try {
+        const allDatas = await pool.query("SELECT * FROM web.v_intranet_formulario_capacitacion where empleado_id = $1",[req.headers.empleado_id])
+        res.json(allDatas.rows)
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+app.get("/empleado-cuestionarios-detalle", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    try {
+        const allDatas = await pool.query("SELECT * FROM web.v_intranet_formulario_capacitacion where id = $1",[req.headers.cuestionario_id])
+        res.json(allDatas.rows)
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+app.get("/empleado-desempenio", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    let result = {}
+    let query = ""
+    try {
+        query = "select * from web.v_intranet_eval_desemp_completas"
+        
+        const sectores = []
+        const tipos = []
+        let registros = []
+
+        const allDatas = await pool.query(query)
+
+        allDatas.rows.forEach(row => {
+            if(!sectores.some(e => e.id === row.sector_id)){
+                sectores.push(
+                    {
+                        id: row.sector_id,
+                        descripcion: row.sector
+                    }
+                )
+            }
+            if(!tipos.some(e => e.id === row.tipo_id)){
+                tipos.push(
+                    {
+                        id: row.tipo_id,
+                        descripcion: row.tipo
+                    }
+                )
+            }
+
+            //Oculto registros duplicados (muestro los que no son autoevaluaciones)
+            if(registros.some(r => r.tipo_id === row.tipo_id && r.empleado_evaluar === row.empleado_evaluar)){
+                if(row.usuario != row.usuario_evaluar){
+                    registros = registros.filter(r => !(r.tipo_id === row.tipo_id && r.empleado_evaluar === row.empleado_evaluar && r.ususario === r.usuario_evaluar))
+                    registros.push(row)
+                }
+            }else{
+                registros.push(row)
+            }
+        })
+
+        //Filtros
+
+        if(req.headers.sector != "" && req.headers.sector != null){
+            registros = registros.filter(r => r.sector_id == req.headers.sector)
+        }
+
+        if(req.headers.tipo != "" && req.headers.tipo != null){
+            registros = registros.filter(r => r.tipo_id == req.headers.tipo)
+        }
+
+        if(req.headers.busqueda != "" && req.headers.busqueda != null){
+            registros = registros.filter(r => r.empleado_evaluar.toLowerCase().includes(req.headers.busqueda.toLowerCase()))
+        }
+
+        
+        if(req.headers.empleado_id != "" && req.headers.empleado_id != null){
+            registros = registros.filter(r => r.empleado_id == req.headers.empleado_id)
+        }
+
+        result = {
+            sectores: sectores,
+            tipos: tipos,
+            registros: registros
+        }
+        res.json(result)
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+
 
 /* OPENAI - SELECCION DE PERSONAL */
 
@@ -1202,6 +1338,186 @@ app.get("/entrevistador-requerimiento", passport.authenticate('jwt', { session: 
 })
 
 
+/* PLAN DE CAPACITACION CON IA */
+
+app.get("/plan-capacitacion", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    try {
+        if(req.headers.empleado_id == null){
+            return res.status(500).json({
+                error: "No se encuentra empleado id",
+            });
+        }
+
+        const allDatas = await pool.query(`select * from web.v_intranet_registro_plan_capacitacion where empleado_id = $1 limit 1`, [req.headers.empleado_id]);                
+        if (allDatas.rows.length > 0) {
+            const data = allDatas.rows[0];
+
+            try {
+                data.propuesta = JSON.parse(data.propuesta);
+            } catch (err) {
+                console.warn("No se pudo parsear 'propuesta':", err.message);
+            }
+
+            res.json(data);
+        } else {
+            res.json({});
+        }
+
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+app.get("/obtener-plan-capacitacion", passport.authenticate('jwt', { session: false }), async(req, res) => {
+    try {
+        if(req.headers.empleado_id == null){
+            return res.status(500).json({
+                error: "No se encuentra empleado id",
+            });
+        }
+
+        const empleado_id = req.headers.empleado_id
+
+        if(await existePlanCapacitacion(empleado_id)){
+            try{
+                return res.status(500).json({
+                    error: "No se encuentra empleado id",
+                });
+            }catch(err){
+                console.log(err)
+            }
+        }else{
+
+        const openai = new OpenAI({
+        apiKey: process.env.OPENAI_CAP_API_KEY,
+        });
+
+        //role:system, es el prompt base del motor ia
+        //role:user, es el input con la descripcion de puesto vacante y el listado de empleados que lo pueden entrevistar        
+        
+        const response = await openai.responses.create({
+        model: "gpt-4.1",
+        input: [
+            {
+            "role": "system",
+            "content": [
+                {
+                "type": "input_text",
+                "text": `
+
+                Rol: Eres un Agente de Capacitación, un experto en desarrollo de talento y diseño instruccional. Tu tarea es analizar información de un empleado y crear un plan de capacitación individualizado y efectivo.
+
+                Objetivo: Desarrollar un plan de capacitación integral para un colaborador, identificando brechas de habilidades y diseñando acciones de aprendizaje que lo preparen para alcanzar los objetivos de su puesto.
+
+                Instrucciones y Datos de Entrada:
+
+                A continuación se te proporcionará la siguiente información:
+
+                Descripción del Puesto: Un documento detallado con las responsabilidades, objetivos, habilidades clave y competencias requeridas para el rol del colaborador.
+
+                Resultados de la Evaluación de Desempeño: Un informe con los resultados de su última revisión. Incluye fortalezas destacadas, áreas de mejora y el rendimiento general con respecto a las expectativas del puesto.
+
+                Cuestionario de Detección de Necesidades de Capacitación: Las respuestas directas del colaborador. Esto puede incluir habilidades en las que siente que necesita mejorar, herramientas o tecnologías que le gustaría aprender y sus metas de desarrollo profesional a corto y largo plazo.
+
+                Proceso de Análisis:
+
+                Análisis de Brechas:
+
+                Compara la Descripción del Puesto con los Resultados de la Evaluación de Desempeño. Identifica las brechas entre las habilidades requeridas y el rendimiento actual del empleado.
+
+                Cruza esta información con las respuestas del Cuestionario de Detección de Necesidades. ¿Hay coincidencias entre lo que el empleado percibe como una necesidad y lo que la evaluación de desempeño revela?
+
+                Identifica las brechas clave que son críticas para el éxito en el puesto actual y aquellas que apoyan el crecimiento profesional del colaborador.
+
+                Diseño del Plan de Capacitación:
+
+                Crea una tabla con las siguientes columnas:
+
+                Área de Mejora/Habilidad a Desarrollar: Nombra la habilidad específica o el conocimiento que se debe fortalecer.
+
+                Brecha Identificada: Explica brevemente por qué esta área es una prioridad, haciendo referencia a la descripción del puesto, la evaluación de desempeño o el cuestionario.
+
+                Objetivo de Capacitación: Define un objetivo claro, medible y específico (formato SMART) para cada área. Por ejemplo: "Al finalizar el curso, el colaborador será capaz de utilizar [herramienta] para [tarea específica] y reducir el tiempo de ejecución en un 15%".
+
+                Acciones de Capacitación Recomendadas: Propón al menos 2-3 acciones concretas y variadas para cada objetivo. Las opciones pueden incluir cursos en línea, talleres, mentorías, asignaciones de proyectos especiales, shadowing, certificaciones, o lectura de material especializado.
+
+                Recursos/Herramientas Sugeridas: Menciona plataformas, personas (mentores) o herramientas que podrían ser útiles para la capacitación.
+
+                Plazo Sugerido: Indica un marco de tiempo realista para completar la capacitación (ej. "30 días", "próximo trimestre").
+
+                Formato de Salida:
+
+                Comienza con un resumen ejecutivo que presente las principales conclusiones del análisis.
+
+                Luego, presenta el plan de capacitación en la tabla detallada.
+
+                Finaliza con un párrafo de recomendaciones adicionales y un mensaje motivacional para el colaborador, destacando la importancia de este plan para su crecimiento profesional.
+                
+                Devuelve la información en formato JSON válido
+
+                Formato JSON:
+
+                {
+                    "resumen_ejecutivo":,
+                    "plan_capacitacion":[
+                        {
+                            "area_mejora":,
+                            "brecha_identificada",
+                            "objetivo_capacitacion",
+                            "acciones_recomendadas":,
+                            "recursos_sugeridos":,
+                            "plazo_sugerido":,
+                        }
+                    ],
+                    "recomendaciones_finales":,
+                }
+
+                `
+                }
+            ]
+            },
+            {
+            "role": "user",
+            "content": [
+                {
+                "type": "input_text",
+                "text": "Empleado id a analizar: " + empleado_id  
+                }
+            ]
+            },
+            ],
+            text: {
+                "format": {
+                "type": "json_object"
+                }
+            },
+            reasoning: {},
+            tools: [
+                {
+                "type": "file_search",
+                "vector_store_ids": [ process.env.OPENAI_CAP_VECTOR_ID ]
+                }
+            ],
+            temperature: 1,
+            max_output_tokens: 2048,
+            top_p: 1,
+            store: true
+            });
+
+            const parsedOutput = typeof response.output_text === "string"
+                ? JSON.parse(response.output_text)
+                : response.output_text;
+
+            altaPlanCapacitacion(parsedOutput, empleado_id)
+
+            res.json(parsedOutput);
+    }
+    } catch (err) {
+        console.log(err)
+    }
+})
+
+
 function parsePdfBuffer(buffer) {
   return new Promise((resolve, reject) => {
     let text = "";
@@ -1221,7 +1537,7 @@ function parsePdfBuffer(buffer) {
 }
 
 // Ruta principal
-app.post("/enviar-data-storage", async (req, res) => {
+app.post("/enviar-data-storage-conclave", async (req, res) => {
   try {
     const openai = new OpenAI({
             apiKey: process.env.OPENAI_API_KEY,
@@ -1242,6 +1558,8 @@ app.post("/enviar-data-storage", async (req, res) => {
       });
     }
 
+
+    
     // Guardar archivo JSON
     const filePath = path.join(__dirname, "files", "empleados.json");
     fs.writeFileSync(filePath, JSON.stringify(empleados, null, 2));
@@ -1276,6 +1594,99 @@ app.post("/enviar-data-storage", async (req, res) => {
   }
 });
 
+
+// Ruta principal
+app.post("/enviar-data-storage-capacitacion", async (req, res) => {
+  try {
+    const openai = new OpenAI({
+            apiKey: process.env.OPENAI_CAP_API_KEY,
+    });
+
+    const resultPg = await pool.query("SELECT * FROM web.v_intranet_plan_capacitacion_empleados");
+
+    const empleadosMap = new Map();
+
+    for (const row of resultPg.rows) {
+    // resultPg.rows.forEach(row => {
+        if (!empleadosMap.has(row.empleado_id)) {
+        const texto = await parsePdfBuffer(row.puesto_pdf);    
+        empleadosMap.set(row.empleado_id, {
+            empleado_id: row.empleado_id,
+            empleado: row.empleado,
+            puesto: row.puesto,
+            legajo: row.legajo,
+            sector: row.sector,
+            puesto_pdf: texto,
+            cuestionario_capacitacion: {
+            conocimiento_mision_vision_valores: row.conocimiento_mision_vision_valores,
+            conocimiento_politica_calidad: row.conocimiento_politica_calidad,
+            conocimiento_politica_seguridad: row.conocimiento_politica_seguridad,
+            conocimiento_normas_convivencia: row.conocimiento_normas_convivencia,
+            habilidades_suficientes: row.habilidades_suficientes,
+            necesidades_capacitacion: row.necesidades_capacitacion,
+            tipo_formacion_preferida: row.tipo_formacion_preferida,
+            barreras_capacitacion: row.barreras_capacitacion,
+            temas_especificos: row.temas_especificos,
+            impacto_capacitacion_desempeno: row.impacto_capacitacion_desempeno
+            },
+            evaluacion_desempenio: {
+            fecha: row.fecha_desempenio,
+            resultados: []
+            }
+        });
+        }
+
+        // Agregar el resultado de desempeño
+        empleadosMap.get(row.empleado_id).evaluacion_desempenio.resultados.push({
+        pregunta: row.pregunta_desempenio,
+        respuesta: row.respuesta_desempenio,
+        puntuacion: row.puntuacion_desempenio,
+        feedback: row.feedback_desempenio
+        });
+    }
+
+    //res.json(Array.from(empleadosMap.values()))
+
+    // Guardar archivo JSON
+    const filePath = path.join(__dirname, "files", "empleados-cap.json");
+    fs.writeFileSync(
+    filePath,
+    JSON.stringify(Array.from(empleadosMap.values()), null, 2),
+    "utf8"
+    );
+
+    
+    // Subir a OpenAI
+    const file = await openai.files.create({
+      file: fs.createReadStream(filePath),
+      purpose: "assistants",
+    });
+
+    // Agregar al vector store
+    const vectorStoreId = process.env.OPENAI_CAP_VECTOR_ID;
+    let result;
+    try {
+        result = await openai.vectorStores.files.create(vectorStoreId, {file_id: file.id,});
+    } catch (err) {
+        console.error("Error agregando archivo al vector store:", err);
+        return res.status(500).json({
+            error: "No se pudo agregar el archivo al vector store.",
+            details: err?.response?.data || err.message || err,
+        });
+    }
+
+    res.json({
+      message: "Archivo subido y agregado al vector store.",
+      file_id: file.id,
+      vector_store_result: result,
+    });
+
+  } catch (err) {
+    console.error("Error:", err);
+    res.status(500).json({ error: "Error procesando la carga al vector store." });
+  }
+});
+
 async function existeEntrevistadores(requerimiento){
     try{
         const allDatas = await pool.query(`select * from web.intranet_registros_colaboradores_propuestos where requerimiento_personal_id = $1 and empleado_id IS NOT NULL`, [requerimiento]);
@@ -1303,6 +1714,29 @@ async function eliminarEntrevistadoresPrevios(requerimiento, empleado){
     try {
         await pool.query("delete from web.intranet_registros_colaboradores_propuestos where requerimiento_personal_id = $1", [requerimiento])
     } catch(err){
+        console.log(err)
+    }
+}
+
+async function altaPlanCapacitacion(plan, empleado){
+    try {
+        await pool.query("insert into web.intranet_registros_plan_capacitacion (propuesta , empleado_id) values($1, $2)", [plan, empleado])
+    } catch(err){
+        res.status(500).json({ error: "Error procesando el archivo o conectando con OpenAI." });
+        console.log(err)
+    }
+}
+
+async function existePlanCapacitacion(empleado_id){
+    try{
+        const allDatas = await pool.query(`select * from web.intranet_registros_plan_capacitacion where empleado_id = $1`, [empleado_id]);
+        console.log(allDatas)
+        if(allDatas.rows.length > 0){
+            return true
+        }else{
+            return false
+        }
+    }catch(err){
         console.log(err)
     }
 }
