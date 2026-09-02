@@ -14,18 +14,28 @@
     "bcrypt": "^5.1.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
+    "csv-parse": "^6.2.1",
+    "dotenv": "^17.2.4",
     "ejs": "^3.1.9",
     "express": "^4.18.2",
     "express-flash": "^0.0.2",
     "express-session": "^1.17.3",
     "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "node-cron": "^3.0.3",
     "nodemon": "^3.0.2",
     "openai": "^4.95.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "passport-local": "^1.0.0",
+    "pdf-to-png-converter": "^4.1.1",
     "pdfreader": "^3.0.7",
     "pg": "^8.11.2",
     "sequelize": "^6.33.0"
+  },
+  "nodemonConfig": {
+    "ignore": [
+      "files/*.json"
+    ]
   }
 }
