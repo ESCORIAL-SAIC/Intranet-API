@@ -159,3 +159,6 @@ dist
 # Ignore all local history of files
 .history
 .ionide
+
+# Ignore all sql files in the project
+*.sql
