@@ -2647,6 +2647,10 @@ function parsearResultado(raw) {
     return Number.isFinite(n) ? n : null;
 }
 
+// Nota: umbral_score1 ("No alcanza") se guarda y se puede editar como los demás umbrales,
+// pero no participa de esta cuenta — el puntaje 1 sigue siendo el resultado por defecto
+// cuando el resultado no alcanza el umbral del puntaje 2. Queda como referencia visual/de
+// carga para el evaluador (ej. el piso esperado del pilar).
 function calcularPuntajePilarObjetivo(pilar, resultadoReal) {
     const val = parsearResultado(resultadoReal);
     if (val === null) return null;
@@ -2671,6 +2675,27 @@ function calcularPuntajeFinalObjetivos(pilares) {
 function pesosPilaresValidos(pilares) {
     const suma = pilares.reduce((acc, p) => acc + Number(p.peso || 0), 0);
     return Math.abs(suma - 100) < 0.01;
+}
+
+// Cada pilar debe pesar entre PESO_MIN y PESO_MAX %, y un registro debe tener entre
+// PILARES_MIN y PILARES_MAX pilares (debe reflejar exactamente lo mismo que
+// components/Modules/ObjetivosAnuales/constants.js y utils.js en el frontend).
+const PESO_MIN_PILAR = 10;
+const PESO_MAX_PILAR = 40;
+const PILARES_MIN = 3;
+const PILARES_MAX = 5;
+
+function pesoPilarValido(peso) {
+    const n = Number(peso);
+    return Number.isFinite(n) && n >= PESO_MIN_PILAR && n <= PESO_MAX_PILAR;
+}
+
+function todosLosPesosEnRango(pilares) {
+    return pilares.every(p => pesoPilarValido(p.peso));
+}
+
+function cantidadPilaresValida(pilares) {
+    return pilares.length >= PILARES_MIN && pilares.length <= PILARES_MAX;
 }
 
 const OBJETIVO_ANUAL_SELECT = `
@@ -2760,6 +2785,12 @@ app.post("/objetivos-anuales", passport.authenticate('jwt', { session: false }),
         if (!Array.isArray(pilares) || pilares.length === 0) {
             return res.status(400).json({ error: "Debe cargar al menos un pilar" });
         }
+        if (!cantidadPilaresValida(pilares)) {
+            return res.status(400).json({ error: `Un registro debe tener entre ${PILARES_MIN} y ${PILARES_MAX} pilares` });
+        }
+        if (!todosLosPesosEnRango(pilares)) {
+            return res.status(400).json({ error: `Cada pilar debe pesar entre ${PESO_MIN_PILAR}% y ${PESO_MAX_PILAR}%` });
+        }
         if (!pesosPilaresValidos(pilares)) {
             return res.status(400).json({ error: "La suma de los pesos de los pilares debe ser 100" });
         }
@@ -2795,12 +2826,12 @@ app.post("/objetivos-anuales", passport.authenticate('jwt', { session: false }),
             const pilarResult = await pool.query(
                 `INSERT INTO web.objetivo_anual_pilar
                  (id, registro_id, orden, nombre, descripcion, peso, unidad, direccion,
-                  umbral_score2, umbral_score3, umbral_score4, umbral_score5)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+                  umbral_score1, umbral_score2, umbral_score3, umbral_score4, umbral_score5)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
                 [
                     require('crypto').randomUUID(), registroId, i,
                     p.nombre, p.descripcion || null, p.peso, p.unidad || null, p.direccion,
-                    p.umbral_score2, p.umbral_score3, p.umbral_score4, p.umbral_score5
+                    p.umbral_score1, p.umbral_score2, p.umbral_score3, p.umbral_score4, p.umbral_score5
                 ]
             );
             pilaresInsertados.push(pilarResult.rows[0]);
@@ -2824,6 +2855,12 @@ app.put("/objetivos-anuales/:id/pilares", passport.authenticate('jwt', { session
         if (!Array.isArray(pilares) || pilares.length === 0) {
             return res.status(400).json({ error: "Debe cargar al menos un pilar" });
         }
+        if (!cantidadPilaresValida(pilares)) {
+            return res.status(400).json({ error: `Un registro debe tener entre ${PILARES_MIN} y ${PILARES_MAX} pilares` });
+        }
+        if (!todosLosPesosEnRango(pilares)) {
+            return res.status(400).json({ error: `Cada pilar debe pesar entre ${PESO_MIN_PILAR}% y ${PESO_MAX_PILAR}%` });
+        }
         if (!pesosPilaresValidos(pilares)) {
             return res.status(400).json({ error: "La suma de los pesos de los pilares debe ser 100" });
         }
@@ -2844,12 +2881,12 @@ app.put("/objetivos-anuales/:id/pilares", passport.authenticate('jwt', { session
             const pilarResult = await pool.query(
                 `INSERT INTO web.objetivo_anual_pilar
                  (id, registro_id, orden, nombre, descripcion, peso, unidad, direccion,
-                  umbral_score2, umbral_score3, umbral_score4, umbral_score5)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+                  umbral_score1, umbral_score2, umbral_score3, umbral_score4, umbral_score5)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
                 [
                     require('crypto').randomUUID(), registroId, i,
                     p.nombre, p.descripcion || null, p.peso, p.unidad || null, p.direccion,
-                    p.umbral_score2, p.umbral_score3, p.umbral_score4, p.umbral_score5
+                    p.umbral_score1, p.umbral_score2, p.umbral_score3, p.umbral_score4, p.umbral_score5
                 ]
             );
             pilaresInsertados.push(pilarResult.rows[0]);
