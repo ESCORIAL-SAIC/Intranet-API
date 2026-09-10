@@ -19,6 +19,9 @@ require('./config/passportJWT')
 const requireAuth = require('./middleware/requireAuth');
 const { getOpenAIClient } = require('./config/openai');
 const { uploadGenoma, uploadCV, uploadChatArchivos } = require('./config/upload');
+const { perteneceGrupo } = require('./shared/grupos');
+const { parsePdfBuffer } = require('./shared/pdf');
+const { obtenerGerenciaDelUsuario } = require('./shared/organigrama');
 
 app.use(cors());
 app.use(express.json())
@@ -28,97 +31,9 @@ app.use(passport.initialize())
 
 app.use(flash())
 
-/* VALIDACION PASSPORT */
-
-app.post("/login",
-    (req, res) => {
-        pool.query("select id, username, password from web.v_intranet_usuarios where username = '"+ req.body.username + "'", (err, results)=>{
-            if(err){
-                throw err;
-            }
-
-            if (results.rows.length > 0){
-                const user = results.rows[0]
-
-                if(req.body.password == user.password){
-                    const payload = {
-                        username: user.username,
-                        id: user.id
-                    }
-
-                    const token = jwt.sign(payload, "Random string", { expiresIn: "365d" })
-
-                    return res.status(200).send({
-                        success: true,
-                        message: "Logged in successfully!",
-                        token: "Bearer " + token
-                    })
-                }else{
-                    return res.status(401).send({
-                        success: false,
-                        message: "Contraseña Incorrecta"
-                    })
-                }
-            } 
-            else{
-                return res.status(401).send({
-                    success: false,
-                    message: "Usuario no encontrado"
-                })
-            } 
-        })
-    }
-)
-
-app.get("/main", requireAuth, (req, res) => {
-     return res.status(200).send({
-        success: true,
-        user: {
-            id: req.user.id,
-            username: req.user.username,
-        }
-    })
-})
-
-app.get("/perteneceagrupo", requireAuth, async (req, res) => {
-    try{
-        const grupos = req.headers.grupousuario.split(',');
-        const placeholders = grupos.map((_, index) => `${_}`).join(','); 
-        const allDatas = await pool.query(`select * from web.v_intranet_usuarios_grupos where usuario = $1 and grupo in (${placeholders})`, [req.user.username]);
-
-        if(allDatas.rows.length > 0){
-            return res.status(200).send({
-                success: true,
-                user: {
-                    id: req.user.id,
-                    username: req.user.username,
-                }
-            })
-        }else{
-            return res.status(400).send({
-                success: false
-            })
-        }
-    } catch (err) {
-        console.log(err.message);
-    }
-})
-
-async function perteneceGrupo(e){
-    try{
-        const grupos = e.grupousuario.split(',');
-        const placeholders = grupos.map((_, index) => `${_}`).join(','); 
-        const allDatas = await pool.query(`select * from web.v_intranet_usuarios_grupos where usuario = $1 and grupo in (${placeholders})`, [e.username]);
-
-        if(allDatas.rows.length > 0){
-            return true
-        }else{
-            return false
-        }
-    } catch (err) {
-        return false
-    }
-}
+app.use(require('./modules/auth/auth.routes'));
+app.use(require('./modules/dashboard/dashboard.routes'));
+app.use(require('./modules/explorador/explorador.routes'));
 
 app.get("/evaluacion", requireAuth, async (req, res) => {
     try{       
@@ -141,208 +56,6 @@ app.get("/evaluacion", requireAuth, async (req, res) => {
         console.log(err.message);
     }
 })
-
-/* ELEMENTOS APP REACT */
-
-app.get("/menu-button", requireAuth, async(req, res) => {
-    try {
-        const allDatas = await pool.query("select id, name, link, img_icon, button_color from web.v_intranet_accesos where usuario = $1", [req.user.username]);
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-/* PESTAÑA PRINCIPAL */
-
-app.get("/cumple", async(req, res) => {
-    try {
-        const allDatas = await pool.query("select * from web.v_intranet_cumpleanios limit 8");
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message);
-    }
-})
-
-app.get("/comunicaciones", async(req, res) => {
-    try {
-        const allDatas = await pool.query("select fecha::date, asunto, replace(cuerpo,'<img src=''cid:imagen'' />','') cuerpo, imagen as imagen from web.envio_comunicaciones where inicio = true and enviado = true and imagen <> '' order by fecha desc LIMIT 6");
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-app.get("/bienvenido", requireAuth, async(req, res) => {
-    //res.render('main')
-        try {
-            const allDatas = await pool.query("select * from web.v_intranet_usuario_detallado where usuario = $1", [req.user.username]);
-            res.json(allDatas.rows)
-        } catch (err) {
-            console.log(err.message)
-        }
-})
-
-app.get("/usuario", requireAuth, async(req, res) => {
-    // res.json({"usuario": req.user.username})
-    
-    try {
-        const allDatas = await pool.query("select usuario, nombre from web.v_intranet_usuario_detallado where usuario = $1", [req.user.username]);
-        
-        res.json({"usuario": allDatas.rows[0].usuario, "nombre": allDatas.rows[0].nombre})
-    } catch (err) {
-        console.log(err.message)
-    }
-    
-})
-
-app.get("/capacitaciones", requireAuth, async(req, res) => {
-    try {
-        const allDatas = await pool.query("select * from web.v_intranet_capacitaciones where usuario_sistema = $1", [req.user.username]);
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-app.get("/insumos", requireAuth, async(req, res) => {
-    try {
-        const allDatas = await pool.query("select * from web.v_intranet_insumos where usuario = $1", [req.user.username])
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-app.get("/eventos", async(req, res) => {
-    try {
-        const allDatas = await pool.query("select * from web.v_intranet_eventos where not (dia::int >= 9 and dia::int <= 22 and mes = 'FEB') limit 3")
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-app.get("/tareas-pend-cant", requireAuth, async(req, res) => {
-    try {
-        const allDatas = await pool.query("select * from web.v_intranet_cant_pendiente where usuario = $1", [req.user.username])
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-app.get("/tareas", requireAuth, async(req, res) => {
-    try {
-        const allDatas = await pool.query("select * from web.v_intranet_pendientes where usuario = $1", [req.user.username])
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-app.get("/powerbi-accesos", requireAuth, async(req, res) => {
-    try {
-        const allDatas = await pool.query("select * from WEB.power_bi_accesos order by nombre")
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
-
-
-/* EXPLORADOR DE ARCHIVOS */
-
-app.get("/getdir", async(req, res) => {
-    
-    
-    function getDirectoryContents(dirPath) {
-        try{
-            const items = fs.readdirSync(dirPath);
-    
-            const result = {
-                name: path.basename(dirPath),
-                path: dirPath,
-                type: 'folder',
-                items: [],
-            };
-            
-            items.forEach(item => {
-                const itemPath = path.join(dirPath, item);
-                const stats = fs.statSync(itemPath);
-            
-                if (stats.isDirectory()) {
-                    const subdirectoryContents = getDirectoryContents(itemPath);
-                    result.items.push(subdirectoryContents);
-                } else {
-                    result.items.push(
-                        {
-                            name: item, 
-                            path: itemPath,
-                            type: 'file',
-                        }
-                    );
-                }
-            });
-            
-            return result;
-        } catch (err) {
-            console.log(err.message)
-        }
-      
-    }
-    
-    const targetDirectory = req.query.dir; 
-    const directoryContents = getDirectoryContents(targetDirectory);
-    
-    res.json(directoryContents)
-})
-
-app.get("/searchdir", async(req, res) => {
-    
-    const result = {
-        name: path.basename(req.query.dir),
-        type: 'folder',
-        items: [],
-    }
-
-    function getDirectoryContents(dirPath, word) {
-
-        try{
-            const items = fs.readdirSync(dirPath);
-        
-            items.forEach(item => {
-                const itemPath = path.join(dirPath, item);
-                const stats = fs.statSync(itemPath);
-            
-                if (stats.isDirectory()) {
-                    const subdirectoryContents = getDirectoryContents(itemPath, word);
-                } else {
-                    if(item.includes(word)){
-                        result.items.push(
-                            {
-                                name: item, 
-                                path: itemPath,
-                                type: 'file',
-                            }
-                        );
-                    }
-                }
-            });
-            
-            return result;
-        } catch (err) {
-            console.log(err.message);
-        }
-      
-    }
-    
-    const targetDirectory = req.query.dir;
-    const search = req.query.search; 
-    const directoryContents = getDirectoryContents(targetDirectory, search);
-    res.json(directoryContents)
-})
-
 
 /* EXAMEN DESEMPEÑO */
 
@@ -2291,24 +2004,6 @@ app.get("/obtener-plan-capacitacion", requireAuth, async(req, res) => {
 })
 
 
-function parsePdfBuffer(buffer) {
-  return new Promise((resolve, reject) => {
-    let text = "";
-    const reader = new PdfReader();
-
-    reader.parseBuffer(buffer, (err, item) => {
-      if (err) {
-        reject(err);
-      } else if (!item) {
-        // Fin del documento
-        resolve(text.trim());
-      } else if (item.text) {
-        text += " " + item.text;
-      }
-    });
-  });
-}
-
 // Ruta principal
 app.post("/enviar-data-storage-conclave", async (req, res) => {
   try {
@@ -3003,30 +2698,6 @@ app.delete("/objetivos-anuales/:id", requireAuth, async(req, res) => {
 /* MATRIZ 9-BOX */
 
 // Función auxiliar: Obtener gerencia/sector del usuario autenticado
-async function obtenerGerenciaDelUsuario(username) {
-    try {
-        const result = await pool.query(`
-            SELECT 
-                g.id as gerencia_id,
-                g.nombre as gerencia_nombre,
-                emp.id as empleado_id,
-                s.nombre as sector_nombre,
-                udemp.dependenciaorganigrama_id
-            FROM ud_empleado udemp
-            LEFT JOIN empleado emp ON emp.boextension_id = udemp.id
-            LEFT JOIN gerencia g ON g.id = emp.gerencia_id
-            left join sector s on s.id = emp.sector_id 
-            WHERE udemp.usuario_sistema = $1
-            LIMIT 1
-        `, [username]);
-        
-        return result.rows[0] || null;
-    } catch (err) {
-        console.log('Error obtener gerencia del usuario:', err);
-        return null;
-    }
-}
-
 // Función auxiliar: Obtener reportes directos del usuario (1 nivel jerárquico abajo via puestodependencia)
 async function obtenerReportesDirectos(username) {
     try {
