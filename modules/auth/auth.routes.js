@@ -9,7 +9,7 @@ const router = express.Router();
 
 router.post("/login",
     (req, res) => {
-        pool.query("select id, username, password from web.v_intranet_usuarios where username = '"+ req.body.username + "'", (err, results)=>{
+        pool.query("select id, username, password from web.v_intranet_usuarios where username = $1", [req.body.username], (err, results)=>{
             if(err){
                 throw err;
             }
