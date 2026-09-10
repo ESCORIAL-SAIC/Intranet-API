@@ -9,14 +9,16 @@ const session = require("express-session")
 const flash = require("express-flash")
 const passport = require("passport")
 const jwt = require('jsonwebtoken')
-const OpenAI = require("openai");
 const PdfReader = require('pdfreader').PdfReader;
 const { parse } = require('csv-parse/sync');
-const multer = require('multer');
 
 require("dotenv").config();
 
 require('./config/passportJWT')
+
+const requireAuth = require('./middleware/requireAuth');
+const { getOpenAIClient } = require('./config/openai');
+const { uploadGenoma, uploadCV, uploadChatArchivos } = require('./config/upload');
 
 app.use(cors());
 app.use(express.json())
@@ -68,7 +70,7 @@ app.post("/login",
     }
 )
 
-app.get("/main", passport.authenticate('jwt', { session: false }), (req, res) => {
+app.get("/main", requireAuth, (req, res) => {
      return res.status(200).send({
         success: true,
         user: {
@@ -78,7 +80,7 @@ app.get("/main", passport.authenticate('jwt', { session: false }), (req, res) =>
     })
 })
 
-app.get("/perteneceagrupo", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.get("/perteneceagrupo", requireAuth, async (req, res) => {
     try{
         const grupos = req.headers.grupousuario.split(',');
         const placeholders = grupos.map((_, index) => `${_}`).join(','); 
@@ -118,7 +120,7 @@ async function perteneceGrupo(e){
     }
 }
 
-app.get("/evaluacion", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.get("/evaluacion", requireAuth, async (req, res) => {
     try{       
         const allDatas = await pool.query("select qa.cuestionario_id, qa.tipo, qa.fechadesde, qa.fechahasta from web.v_intranet_eval_desemp_pre_res qa where not exists (select 1 from web.intranet_registro_eval_desemp qb where qb.cuestionario_id = qa.cuestionario_id and qb.usuario = $1) group by 1,2,3,4", [req.user.username]);
 
@@ -142,7 +144,7 @@ app.get("/evaluacion", passport.authenticate('jwt', { session: false }), async (
 
 /* ELEMENTOS APP REACT */
 
-app.get("/menu-button", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/menu-button", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select id, name, link, img_icon, button_color from web.v_intranet_accesos where usuario = $1", [req.user.username]);
         res.json(allDatas.rows)
@@ -171,7 +173,7 @@ app.get("/comunicaciones", async(req, res) => {
     }
 })
 
-app.get("/bienvenido", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/bienvenido", requireAuth, async(req, res) => {
     //res.render('main')
         try {
             const allDatas = await pool.query("select * from web.v_intranet_usuario_detallado where usuario = $1", [req.user.username]);
@@ -181,7 +183,7 @@ app.get("/bienvenido", passport.authenticate('jwt', { session: false }), async(r
         }
 })
 
-app.get("/usuario", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/usuario", requireAuth, async(req, res) => {
     // res.json({"usuario": req.user.username})
     
     try {
@@ -194,7 +196,7 @@ app.get("/usuario", passport.authenticate('jwt', { session: false }), async(req,
     
 })
 
-app.get("/capacitaciones", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/capacitaciones", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select * from web.v_intranet_capacitaciones where usuario_sistema = $1", [req.user.username]);
         res.json(allDatas.rows)
@@ -203,7 +205,7 @@ app.get("/capacitaciones", passport.authenticate('jwt', { session: false }), asy
     }
 })
 
-app.get("/insumos", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/insumos", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select * from web.v_intranet_insumos where usuario = $1", [req.user.username])
         res.json(allDatas.rows)
@@ -221,7 +223,7 @@ app.get("/eventos", async(req, res) => {
     }
 })
 
-app.get("/tareas-pend-cant", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/tareas-pend-cant", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select * from web.v_intranet_cant_pendiente where usuario = $1", [req.user.username])
         res.json(allDatas.rows)
@@ -230,7 +232,7 @@ app.get("/tareas-pend-cant", passport.authenticate('jwt', { session: false }), a
     }
 })
 
-app.get("/tareas", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/tareas", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select * from web.v_intranet_pendientes where usuario = $1", [req.user.username])
         res.json(allDatas.rows)
@@ -239,7 +241,7 @@ app.get("/tareas", passport.authenticate('jwt', { session: false }), async(req, 
     }
 })
 
-app.get("/powerbi-accesos", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/powerbi-accesos", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select * from WEB.power_bi_accesos order by nombre")
         res.json(allDatas.rows)
@@ -346,7 +348,7 @@ app.get("/searchdir", async(req, res) => {
 
 
 //Valida si el usuario tiene permisos para acceder a dicha evaluacion
-app.get("/validar-eval", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/validar-eval", requireAuth, async(req, res) => {
     const result = []
     try {
         const allDatas = await pool.query(`(
@@ -371,7 +373,7 @@ app.get("/validar-eval", passport.authenticate('jwt', { session: false }), async
 })
 
 //Obtiene un listado con las evaluacion pendientes a realizar del usuario
-app.get("/evaluacion-desempenio-pend", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/evaluacion-desempenio-pend", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query(`(
             SELECT DISTINCT Z.cuestionario_id, Z.empleado_evaluar,Z.usuario_evaluar,Z.tipo,Z.fechadesde,Z.fechahasta, $1 as evaluador FROM web.v_intranet_desemp_pend Z WHERE 
@@ -402,7 +404,7 @@ app.get("/evaluacion-desempenio-pend", passport.authenticate('jwt', { session: f
 })
 
 //Muestra un listado con las preguntas y posibles respuestas de una evaluacion en especifico
-app.get("/evaluacion-desempenio-det", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/evaluacion-desempenio-det", requireAuth, async(req, res) => {
     const result = []
     try {
         const allDatas = await pool.query("select qa.* from web.v_intranet_eval_desemp_pre_res qa where not exists (select 1 from web.intranet_registro_eval_desemp qb where qb.cuestionario_id = qa.cuestionario_id and qb.usuario = $1 and qb.usuario_evaluar = $3) and qa.cuestionario_id = $2 order by qa.pregunta_id, qa.nivel", [req.user.username, req.headers.cuestionario, req.headers.usuario])        
@@ -464,7 +466,7 @@ app.get("/evaluacion-desempenio-det", passport.authenticate('jwt', { session: fa
 })
 
 //Muestra un listado de las evaluacion de desempenio completadas por el usuario
-app.get("/evaluacion-desempenio-completas", passport.authenticate('jwt', { session: false }), async(req, res) => {    
+app.get("/evaluacion-desempenio-completas", requireAuth, async(req, res) => {    
     try {
         const allDatas = await pool.query("select * from web.v_intranet_eval_desemp_completas where usuario = $1", [req.user.username])
         res.json(allDatas.rows)
@@ -474,7 +476,7 @@ app.get("/evaluacion-desempenio-completas", passport.authenticate('jwt', { sessi
     }
 })
 
-app.get("/evaluacion-desempenio-completas-p", passport.authenticate('jwt', { session: false }), async(req, res) => {    
+app.get("/evaluacion-desempenio-completas-p", requireAuth, async(req, res) => {    
     let result = {}
     let query = ""
     try {
@@ -559,7 +561,7 @@ app.get("/evaluacion-desempenio-completas-p", passport.authenticate('jwt', { ses
 })
 
 //Muestra un listado de las evaluacion de desempenio completadas por el usuario
-app.get("/evaluacion-desempenio-completas-full", passport.authenticate('jwt', { session: false }), async(req, res) => {    
+app.get("/evaluacion-desempenio-completas-full", requireAuth, async(req, res) => {    
     try {
         const allDatas = await pool.query("select * from web.v_intranet_eval_desemp_completas")
         res.json(allDatas.rows)
@@ -569,7 +571,7 @@ app.get("/evaluacion-desempenio-completas-full", passport.authenticate('jwt', { 
 })
 
 //Muestra en detalle las respuestas completadas en una evaluacion en especifico
-app.get("/evaluacion-desempenio-completas-res", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/evaluacion-desempenio-completas-res", requireAuth, async(req, res) => {
     const result = []
     try {
         let preguntas = []
@@ -662,7 +664,7 @@ app.get("/evaluacion-desempenio-completas-res", passport.authenticate('jwt', { s
 })
 
 //Recibe un json con las respuestas completas y las registra en una tabla con sus preguntas especificas
-app.post("/enviar-evaluacion", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.post("/enviar-evaluacion", requireAuth, async(req, res) => {
     try {
         await pool.query("insert into web.intranet_registro_eval_desemp (cuestionario_id, usuario, usuario_evaluar) values($1, $2, $3)",[req.headers.cuestionario, req.user.username, req.headers.usuario])
         
@@ -679,7 +681,7 @@ app.post("/enviar-evaluacion", passport.authenticate('jwt', { session: false }),
     res.sendStatus(200)
 })
 
-app.post("/agregar-puntos-feedback", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.post("/agregar-puntos-feedback", requireAuth, async(req, res) => {
     try{
         await pool.query("update web.intranet_registro_eval_desemp_feedback set feedback = $2 where registro_id = $1",[req.headers.cuestionario, req.body.feedback])    
     } catch (err) {
@@ -691,7 +693,7 @@ app.post("/agregar-puntos-feedback", passport.authenticate('jwt', { session: fal
 
 /* REGISTRO ESTUDIOS */
 
-app.get("/estudios-clasificadores", passport.authenticate('jwt', { session: false }), async(req, res) => { 
+app.get("/estudios-clasificadores", requireAuth, async(req, res) => { 
     const result = []
     const tipoEstudio = []
     const tipoProgreso = []
@@ -726,7 +728,7 @@ app.get("/estudios-clasificadores", passport.authenticate('jwt', { session: fals
     }
 })
 
-app.post("/enviar-estudios", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.post("/enviar-estudios", requireAuth, async(req, res) => {
     try {
         req.body.forEach(async(ele) => {
             await pool.query("insert into web.intranet_registro_estudios (tipo_estudio_id, estudio, progreso_id, usuario) values($1, $2, $3, $4)", [ele.tipoEstudioId, ele.estudio, ele.progresoId, req.user.username])
@@ -738,7 +740,7 @@ app.post("/enviar-estudios", passport.authenticate('jwt', { session: false }), a
     res.sendStatus(200)
 });
 
-app.post("/modificar-estudios", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.post("/modificar-estudios", requireAuth, async(req, res) => {
     const idsActuales = []
     const estudios = []
     const nuevosEstudios = []
@@ -768,7 +770,7 @@ app.post("/modificar-estudios", passport.authenticate('jwt', { session: false })
     res.sendStatus(200)
 });
 
-app.get("/carga-estudios-pendiente", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/carga-estudios-pendiente", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query(`
         (select 0,null,null,'','',null,''
@@ -797,7 +799,7 @@ app.get("/carga-estudios-pendiente", passport.authenticate('jwt', { session: fal
     }
 })
 
-app.get("/estudios-cargados", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/estudios-cargados", requireAuth, async(req, res) => {
     const result = []
     const respuestas = []
     const tipoEstudio = []
@@ -877,7 +879,7 @@ async function modificarEstudios(estudio){
 
 /* EMPLEADOS */
 
-app.get("/empleados", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleados", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select * from web.intranet_registro_estudios where usuario = $1", [req.user.username])
         res.json(allDatas.rows)
@@ -888,7 +890,7 @@ app.get("/empleados", passport.authenticate('jwt', { session: false }), async(re
 
 /* LOCKERS */
 
-app.get("/lockers", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/lockers", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("select * from web.v_intranet_lockers where planta = $1", [req.query.planta])
         res.json(allDatas.rows)
@@ -899,7 +901,7 @@ app.get("/lockers", passport.authenticate('jwt', { session: false }), async(req,
 
 /* SECCION DETALLADA DE EMPLEADOS */
 
-app.get("/empleado-detalle", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleado-detalle", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("SELECT * FROM web.v_intranet_empleado_detalle where id = $1", [req.headers.empleado_id])
         res.json(allDatas.rows)
@@ -908,7 +910,7 @@ app.get("/empleado-detalle", passport.authenticate('jwt', { session: false }), a
     }
 })
 
-app.get("/legajos-empleados", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/legajos-empleados", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("SELECT empleado_id, empleado, legajo, puesto, image FROM web.v_intranet_plan_capacitacion_empleados group by 1,2,3,4,5")
         
@@ -928,7 +930,7 @@ app.get("/legajos-empleados", passport.authenticate('jwt', { session: false }), 
     }
 })
 
-app.get("/empleado-puesto", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleado-puesto", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("SELECT puesto_pdf as puesto FROM web.v_intranet_puestos_empleados where empleado_id = $1",[req.headers.empleado_id])
         res.json(allDatas.rows)
@@ -937,7 +939,7 @@ app.get("/empleado-puesto", passport.authenticate('jwt', { session: false }), as
     }
 })
 
-app.get("/empleado-cuestionarios", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleado-cuestionarios", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("SELECT * FROM web.v_intranet_formulario_capacitacion where empleado_id = $1",[req.headers.empleado_id])
         res.json(allDatas.rows)
@@ -946,7 +948,7 @@ app.get("/empleado-cuestionarios", passport.authenticate('jwt', { session: false
     }
 })
 
-app.get("/empleado-cuestionarios-detalle", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleado-cuestionarios-detalle", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("SELECT * FROM web.v_intranet_formulario_capacitacion where id = $1",[req.headers.cuestionario_id])
         res.json(allDatas.rows)
@@ -955,7 +957,7 @@ app.get("/empleado-cuestionarios-detalle", passport.authenticate('jwt', { sessio
     }
 })
 
-app.get("/empleado-desempenio", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleado-desempenio", requireAuth, async(req, res) => {
     let result = {}
     let query = ""
     try {
@@ -1026,7 +1028,7 @@ app.get("/empleado-desempenio", passport.authenticate('jwt', { session: false })
     }
 })
 
-app.get("/empleado-genoma", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleado-genoma", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query(
             "SELECT fecha, tipo_eval, evaluacion, resultado FROM web.genoma_registros WHERE empleado_id = $1 ORDER BY fecha DESC, tipo_eval, evaluacion",
@@ -1039,7 +1041,7 @@ app.get("/empleado-genoma", passport.authenticate('jwt', { session: false }), as
     }
 })
 
-app.get("/empleado-cv-datos", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/empleado-cv-datos", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query(
             "SELECT cv_datos, nombre_archivo, fecha FROM web.intranet_cv WHERE empleado_id = $1 ORDER BY fecha DESC LIMIT 1",
@@ -1056,7 +1058,7 @@ app.get("/empleado-cv-datos", passport.authenticate('jwt', { session: false }), 
 
 /* OPENAI - SELECCION DE PERSONAL */
 
-app.get("/requerimiento-personal", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/requerimiento-personal", requireAuth, async(req, res) => {
     try {
         
         let query = ""
@@ -1151,7 +1153,7 @@ app.get("/requerimiento-personal", passport.authenticate('jwt', { session: false
     }
 })
 
-app.get('/organigrama', passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get('/organigrama', requireAuth, async(req, res) => {
   //const { gerencia, format } = req.query;
   const gerencia = await buscaGerencia(req.user.username)
   if (!gerencia) {
@@ -1354,7 +1356,7 @@ while (queue.length > 0) {
   }
 }
 
-app.post("/entrevistador", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.post("/entrevistador", requireAuth, async(req, res) => {
     try {
         const items = [];
         const allDatas = await pool.query("select * from web.v_intranet_puestos_empleados")
@@ -1387,11 +1389,9 @@ app.post("/entrevistador", passport.authenticate('jwt', { session: false }), asy
         }
 
         console.log(items);
-        
-        const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-        });
-        
+
+        const openai = getOpenAIClient('OPENAI_API_KEY');
+
 
         //role:system, es el prompt base del motor ia
         //role:user, es el input con la descripcion de puesto vacante y el listado de empleados que lo pueden entrevistar
@@ -1441,7 +1441,7 @@ app.post("/entrevistador", passport.authenticate('jwt', { session: false }), asy
     }
 })
 
-// app.get("/entrevistador-requerimiento", passport.authenticate('jwt', { session: false }), async(req, res) => {
+// app.get("/entrevistador-requerimiento", requireAuth, async(req, res) => {
 //     try {
 
 //         if(await existeEntrevistadores(req.headers.requerimiento)){
@@ -1644,7 +1644,7 @@ app.post("/entrevistador", passport.authenticate('jwt', { session: false }), asy
 // })
 
 
-app.get("/entrevistador-requerimiento", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/entrevistador-requerimiento", requireAuth, async(req, res) => {
     try {
 
         if(await existeEntrevistadores(req.headers.requerimiento)){
@@ -1685,10 +1685,7 @@ app.get("/entrevistador-requerimiento", passport.authenticate('jwt', { session: 
             esGerente: descripcion.includes("gerente")
         };
 
-        const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-        });
-
+        const openai = getOpenAIClient('OPENAI_API_KEY');
 
         const embeddingReq = await openai.embeddings.create({
         model: "text-embedding-3-small",
@@ -1949,7 +1946,7 @@ function detectarJerarquia(puesto){
 
 /* PLAN DE CAPACITACION CON IA */
 
-app.get("/plan-capacitacion", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/plan-capacitacion", requireAuth, async(req, res) => {
     try {
         if(req.headers.empleado_id == null){
             return res.status(500).json({
@@ -1977,7 +1974,7 @@ app.get("/plan-capacitacion", passport.authenticate('jwt', { session: false }), 
     }
 })
 
-app.get("/obtener-plan-capacitacion", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/obtener-plan-capacitacion", requireAuth, async(req, res) => {
     try {
         if(req.headers.empleado_id == null){
             return res.status(500).json({
@@ -2043,13 +2040,11 @@ app.get("/obtener-plan-capacitacion", passport.authenticate('jwt', { session: fa
         
         console.log(empleado)
         
-        const openai = new OpenAI({
-        apiKey: process.env.OPENAI_CAP_API_KEY,
-        });
+        const openai = getOpenAIClient('OPENAI_CAP_API_KEY');
 
         //role:system, es el prompt base del motor ia
-        //role:user, es el input con la descripcion de puesto vacante y el listado de empleados que lo pueden entrevistar        
-        
+        //role:user, es el input con la descripcion de puesto vacante y el listado de empleados que lo pueden entrevistar
+
         const response = await openai.responses.create({
         model: "gpt-4.1",
         input: [
@@ -2219,9 +2214,7 @@ app.get("/obtener-plan-capacitacion", passport.authenticate('jwt', { session: fa
             //res.json(parsedOutput);
             
 
-        const openaiJSON = new OpenAI({
-        apiKey: process.env.OPENAI_CAP_API_KEY,
-        });
+        const openaiJSON = getOpenAIClient('OPENAI_CAP_API_KEY');
 
         //role:system, es el prompt base del motor ia
         //role:user, es el input con la descripcion de puesto vacante y el listado de empleados que lo pueden entrevistar        
@@ -2319,9 +2312,7 @@ function parsePdfBuffer(buffer) {
 // Ruta principal
 app.post("/enviar-data-storage-conclave", async (req, res) => {
   try {
-    const openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY,
-    });
+    const openai = getOpenAIClient('OPENAI_API_KEY');
 
     const resultPg = await pool.query("SELECT * FROM web.v_intranet_puestos_empleados");
     const empleados = [];
@@ -2435,9 +2426,7 @@ function extraerSeccionPuesto(textoCompleto) {
 // Ruta principal
 app.post("/enviar-data-storage-capacitacion", async (req, res) => {
   try {
-    const openai = new OpenAI({
-            apiKey: process.env.OPENAI_CAP_API_KEY,
-    });
+    const openai = getOpenAIClient('OPENAI_CAP_API_KEY');
 
     const resultPg = await pool.query("SELECT * FROM web.v_intranet_plan_capacitacion_empleados");
 
@@ -2580,7 +2569,7 @@ async function existePlanCapacitacion(empleado_id){
 
 /* Carga Objetivos Gerencias */
 
-app.get("/objetivos-gerencias", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/objetivos-gerencias", requireAuth, async(req, res) => {
     try {
         const allDatas = await pool.query("SELECT * FROM web.intranet_objetivo_gerencia")
         res.json(allDatas.rows)
@@ -2589,7 +2578,7 @@ app.get("/objetivos-gerencias", passport.authenticate('jwt', { session: false })
     }
 })
 
-app.put("/gerencias/:id", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.put("/gerencias/:id", requireAuth, async(req, res) => {
     try {
         const gerenciaId = req.params.id;
         const { objetivo, descripcion } = req.body;
@@ -2712,7 +2701,7 @@ const OBJETIVO_ANUAL_SELECT = `
 `;
 
 // GET: listado de registros — admin ve todos, el resto sólo el propio y publicado
-app.get("/objetivos-anuales", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/objetivos-anuales", requireAuth, async(req, res) => {
     try {
         const username = req.user.username;
         const esAdmin = await perteneceGrupo({ username, grupousuario: "'Direccion','administradores','rrhh'" });
@@ -2739,7 +2728,7 @@ app.get("/objetivos-anuales", passport.authenticate('jwt', { session: false }), 
 });
 
 // GET: detalle de un registro + sus pilares
-app.get("/objetivos-anuales/:id", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/objetivos-anuales/:id", requireAuth, async(req, res) => {
     try {
         const registroId = req.params.id;
         const username = req.user.username;
@@ -2772,7 +2761,7 @@ app.get("/objetivos-anuales/:id", passport.authenticate('jwt', { session: false 
 });
 
 // POST: crear un registro (ciclo anual de un empleado) con sus pilares, en borrador
-app.post("/objetivos-anuales", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.post("/objetivos-anuales", requireAuth, async(req, res) => {
     try {
         if (!(await requireAdminObjetivos(req, res))) return;
 
@@ -2845,7 +2834,7 @@ app.post("/objetivos-anuales", passport.authenticate('jwt', { session: false }),
 });
 
 // PUT: reemplazar la definición de pilares de un registro (sólo mientras está en borrador)
-app.put("/objetivos-anuales/:id/pilares", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.put("/objetivos-anuales/:id/pilares", requireAuth, async(req, res) => {
     try {
         if (!(await requireAdminObjetivos(req, res))) return;
 
@@ -2902,7 +2891,7 @@ app.put("/objetivos-anuales/:id/pilares", passport.authenticate('jwt', { session
 });
 
 // PUT: cargar el resultado real de un pilar y recalcular puntajes (pilar + final del registro)
-app.put("/objetivos-anuales/:id/pilar/:pilar_id/resultado", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.put("/objetivos-anuales/:id/pilar/:pilar_id/resultado", requireAuth, async(req, res) => {
     try {
         if (!(await requireAdminObjetivos(req, res))) return;
 
@@ -2946,7 +2935,7 @@ app.put("/objetivos-anuales/:id/pilar/:pilar_id/resultado", passport.authenticat
 });
 
 // PUT: actualizar datos generales del registro (evaluador, año) o publicarlo
-app.put("/objetivos-anuales/:id", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.put("/objetivos-anuales/:id", requireAuth, async(req, res) => {
     try {
         if (!(await requireAdminObjetivos(req, res))) return;
 
@@ -2990,7 +2979,7 @@ app.put("/objetivos-anuales/:id", passport.authenticate('jwt', { session: false 
 });
 
 // DELETE: eliminar un registro creado por error (sólo mientras está en borrador)
-app.delete("/objetivos-anuales/:id", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.delete("/objetivos-anuales/:id", requireAuth, async(req, res) => {
     try {
         if (!(await requireAdminObjetivos(req, res))) return;
 
@@ -3077,7 +3066,7 @@ async function obtenerReportesDirectos(username) {
 }
 
 // GET: Obtener listado de registros 9-box (propios + subordinados en lectura)
-app.get("/nuevebox", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/nuevebox", requireAuth, async(req, res) => {
     try {
         const username = req.user.username;
 
@@ -3147,7 +3136,7 @@ const EVALUACIONES_SELECT = `
 `;
 
 // GET: Obtener un registro específico con sus evaluaciones
-app.get("/nuevebox/:id", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/nuevebox/:id", requireAuth, async(req, res) => {
     try {
         const registroId = req.params.id;
         const username = req.user.username;
@@ -3220,7 +3209,7 @@ app.get("/nuevebox/:id", passport.authenticate('jwt', { session: false }), async
 });
 
 // GET: Obtener empleados disponibles para evaluar del usuario autenticado
-app.get("/nuevebox/:id/empleados-disponibles", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.get("/nuevebox/:id/empleados-disponibles", requireAuth, async(req, res) => {
     try {
         const registroId = req.params.id;
         const username = req.user.username;
@@ -3422,7 +3411,7 @@ async function calcularScores9boxConIA(empleadoId) {
         return null;
     }
 
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const openai = getOpenAIClient('OPENAI_API_KEY');
     const aiResponse = await openai.responses.create({
         model: "gpt-4.1",
         input: [
@@ -3460,7 +3449,7 @@ async function calcularScores9boxConIA(empleadoId) {
 }
 
 // POST: Crear nuevo registro 9-box y cargar automáticamente empleados del usuario
-app.post("/nuevebox", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.post("/nuevebox", requireAuth, async(req, res) => {
     try {
         const { nombre, anio, estado } = req.body;
         const username = req.user.username;
@@ -3577,7 +3566,7 @@ app.post("/nuevebox", passport.authenticate('jwt', { session: false }), async(re
 });
 
 // PUT: Actualizar estado del registro
-app.put("/nuevebox/:id", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.put("/nuevebox/:id", requireAuth, async(req, res) => {
     try {
         const registroId = req.params.id;
         const username = req.user.username;
@@ -3623,7 +3612,7 @@ app.put("/nuevebox/:id", passport.authenticate('jwt', { session: false }), async
 });
 
 // PUT: Actualizar evaluación (caja manual y comentario)
-app.put("/nuevebox/:id/evaluacion/:empleado_id", passport.authenticate('jwt', { session: false }), async(req, res) => {
+app.put("/nuevebox/:id/evaluacion/:empleado_id", requireAuth, async(req, res) => {
     try {
         const { id: registroId, empleado_id: empleadoId } = req.params;
         const username = req.user.username;
@@ -3702,7 +3691,6 @@ app.put("/nuevebox/:id/evaluacion/:empleado_id", passport.authenticate('jwt', { 
 
 /* Análisis de informes Genomawork -> web.genoma_registros */
 
-const uploadGenoma = multer({ storage: multer.memoryStorage() });
 const { pdfToPng } = require('pdf-to-png-converter');
 
 const GENOMA_SYSTEM_PROMPT = `Eres un extractor de datos de informes de evaluación de Genomawork. Vas a recibir las páginas del informe como IMÁGENES (una por página, en orden). Tu tarea es identificar CADA resultado de evaluación individual mencionado en el informe (cada rasgo, dimensión o indicador que tenga un puntaje o nivel propio, incluyendo los números que aparecen dentro de círculos/badges sobre las curvas y los valores de las barras en los gráficos) y devolverlos todos como una lista estructurada, sin resumir ni combinar varios en uno solo.
@@ -3749,7 +3737,7 @@ async function procesarInformeGenomaPdf(pdfBuffer, { empleadoId = null, fechaOve
         image_url: `data:image/png;base64,${p.content.toString('base64')}`
     }));
 
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_GENOMA_API_KEY });
+    const openai = getOpenAIClient('OPENAI_GENOMA_API_KEY');
     const aiResponse = await openai.responses.create({
         model: "gpt-4.1",
         input: [
@@ -3798,7 +3786,7 @@ async function procesarInformeGenomaPdf(pdfBuffer, { empleadoId = null, fechaOve
     return { genomaDatos, fecha, insertResults };
 }
 
-app.post("/genoma", passport.authenticate('jwt', { session: false }), uploadGenoma.single('pdf'), async (req, res) => {
+app.post("/genoma", requireAuth, uploadGenoma.single('pdf'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "Archivo PDF requerido" });
 
@@ -3883,8 +3871,6 @@ module.exports = { procesarGenomaPdfsPendientesERP, procesarInformeGenomaPdf, ca
 
 /* Carga CVs */
 
-const uploadCV = multer({ storage: multer.memoryStorage() });
-
 async function getEmpleadoId(username) {
     try {
         const result = await pool.query(
@@ -3898,7 +3884,7 @@ async function getEmpleadoId(username) {
     }
 }
 
-app.get("/cvs", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.get("/cvs", requireAuth, async (req, res) => {
     try {
         const empleadoId = await getEmpleadoId(req.user.username);
         if (!empleadoId) return res.status(404).json({ error: "Empleado no encontrado" });
@@ -3913,7 +3899,7 @@ app.get("/cvs", passport.authenticate('jwt', { session: false }), async (req, re
     }
 });
 
-app.post("/cvs", passport.authenticate('jwt', { session: false }), uploadCV.single('cv'), async (req, res) => {
+app.post("/cvs", requireAuth, uploadCV.single('cv'), async (req, res) => {
     try {
         const empleadoId = await getEmpleadoId(req.user.username);
         if (!empleadoId) return res.status(404).json({ error: "Empleado no encontrado" });
@@ -3940,7 +3926,7 @@ app.post("/cvs", passport.authenticate('jwt', { session: false }), uploadCV.sing
             ];
         }
 
-        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const openai = getOpenAIClient('OPENAI_API_KEY');
         const aiResponse = await openai.responses.create({
             model: "gpt-4.1",
             input: [
@@ -3988,7 +3974,7 @@ app.post("/cvs", passport.authenticate('jwt', { session: false }), uploadCV.sing
     }
 });
 
-app.delete("/cvs/:id", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.delete("/cvs/:id", requireAuth, async (req, res) => {
     try {
         const empleadoId = await getEmpleadoId(req.user.username);
         if (!empleadoId) return res.status(404).json({ error: "Empleado no encontrado" });
@@ -4003,7 +3989,7 @@ app.delete("/cvs/:id", passport.authenticate('jwt', { session: false }), async (
     }
 });
 
-app.get("/cvs/:id/download", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.get("/cvs/:id/download", requireAuth, async (req, res) => {
     try {
         const empleadoId = await getEmpleadoId(req.user.username);
         if (!empleadoId) return res.status(404).json({ error: "Empleado no encontrado" });
@@ -4317,8 +4303,6 @@ async function requireRRHH(req, res) {
     return true;
 }
 
-const uploadChatArchivos = multer({ storage: multer.memoryStorage() });
-
 // Extrae el contenido de un archivo adjunto (PDF) como bloques de contenido para el input de OpenAI,
 // y devuelve también el texto plano (para persistir y poder reconstruir el historial en turnos futuros).
 async function procesarArchivoChat(file) {
@@ -4340,7 +4324,7 @@ async function procesarArchivoChat(file) {
     };
 }
 
-app.get("/chat-agentes", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.get("/chat-agentes", requireAuth, async (req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
         const lista = Object.entries(AGENTES_CHAT).map(([key, a]) => ({ key, nombre: a.nombre, descripcion: a.descripcion }));
@@ -4351,7 +4335,7 @@ app.get("/chat-agentes", passport.authenticate('jwt', { session: false }), async
     }
 });
 
-app.get("/chat-conversaciones", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.get("/chat-conversaciones", requireAuth, async (req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
         const { agente_key } = req.query;
@@ -4372,7 +4356,7 @@ app.get("/chat-conversaciones", passport.authenticate('jwt', { session: false })
     }
 });
 
-app.post("/chat-conversaciones", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.post("/chat-conversaciones", requireAuth, async (req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
         const { agente_key, titulo } = req.body;
@@ -4392,7 +4376,7 @@ app.post("/chat-conversaciones", passport.authenticate('jwt', { session: false }
     }
 });
 
-app.get("/chat-conversaciones/:id", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.get("/chat-conversaciones/:id", requireAuth, async (req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
         const conv = await pool.query(
@@ -4425,7 +4409,7 @@ app.get("/chat-conversaciones/:id", passport.authenticate('jwt', { session: fals
     }
 });
 
-app.delete("/chat-conversaciones/:id", passport.authenticate('jwt', { session: false }), async (req, res) => {
+app.delete("/chat-conversaciones/:id", requireAuth, async (req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
         await pool.query(
@@ -4439,7 +4423,7 @@ app.delete("/chat-conversaciones/:id", passport.authenticate('jwt', { session: f
     }
 });
 
-app.post("/chat-conversaciones/:id/mensajes", passport.authenticate('jwt', { session: false }), uploadChatArchivos.array('archivos'), async (req, res) => {
+app.post("/chat-conversaciones/:id/mensajes", requireAuth, uploadChatArchivos.array('archivos'), async (req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
         const conv = await pool.query(
@@ -4500,7 +4484,7 @@ app.post("/chat-conversaciones/:id/mensajes", passport.authenticate('jwt', { ses
             ...archivosProcesados.flatMap(a => a.contenido)
         ];
 
-        const openai = new OpenAI({ apiKey: process.env.OPENAI_ASISTENTESRRHH_KEY });
+        const openai = getOpenAIClient('OPENAI_ASISTENTESRRHH_KEY');
         const aiResponse = await openai.responses.create({
             model: "gpt-4.1",
             input: [
