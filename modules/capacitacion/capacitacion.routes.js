@@ -104,7 +104,7 @@ router.get("/obtener-plan-capacitacion", requireAuth, async(req, res) => {
 
         console.log(empleado)
 
-        const openai = getOpenAIClient('OPENAI_CAP_API_KEY');
+        const openai = getOpenAIClient('OPENAI_JSONB_API_KEY');
 
         //role:system, es el prompt base del motor ia
         //role:user, es el input con la descripcion de puesto vacante y el listado de empleados que lo pueden entrevistar
@@ -278,7 +278,7 @@ router.get("/obtener-plan-capacitacion", requireAuth, async(req, res) => {
             //res.json(parsedOutput);
 
 
-        const openaiJSON = getOpenAIClient('OPENAI_CAP_API_KEY');
+        const openaiJSON = getOpenAIClient('OPENAI_JSONB_API_KEY');
 
         //role:system, es el prompt base del motor ia
         //role:user, es el input con la descripcion de puesto vacante y el listado de empleados que lo pueden entrevistar
@@ -357,7 +357,7 @@ router.get("/obtener-plan-capacitacion", requireAuth, async(req, res) => {
 // Ruta principal
 router.post("/enviar-data-storage-capacitacion", async (req, res) => {
   try {
-    const openai = getOpenAIClient('OPENAI_CAP_API_KEY');
+    const openai = getOpenAIClient('OPENAI_JSONB_API_KEY');
 
     const resultPg = await pool.query("SELECT * FROM web.v_intranet_plan_capacitacion_empleados");
 
