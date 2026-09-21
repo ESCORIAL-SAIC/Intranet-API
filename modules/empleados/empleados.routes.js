@@ -44,9 +44,10 @@ router.get("/legajos-empleados", requireAuth, async(req, res) => {
         let data = allDatas.rows;
         let busqueda = req.headers.busqueda;
 
-        if (busqueda !== ""){
+        if (busqueda){
+            const busquedaLower = busqueda.toLowerCase();
             data = data.filter(item =>
-                (item.empleado && item.empleado.toLowerCase().includes(busqueda))
+                (item.empleado && item.empleado.toLowerCase().includes(busquedaLower))
             );
         }
 
