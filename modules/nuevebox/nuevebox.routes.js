@@ -2,49 +2,11 @@ const express = require("express");
 const { pool } = require("../../config/db");
 const requireAuth = require("../../middleware/requireAuth");
 const { getOpenAIClient } = require("../../config/openai");
-const { obtenerGerenciaDelUsuario } = require("../../shared/organigrama");
+const { obtenerGerenciaDelUsuario, obtenerReportesDirectos } = require("../../shared/organigrama");
 
 const router = express.Router();
 
 /* MATRIZ 9-BOX */
-
-// Función auxiliar: Obtener reportes directos del usuario (1 nivel jerárquico abajo via puestodependencia)
-async function obtenerReportesDirectos(username) {
-    try {
-        const result = await pool.query(`
-            SELECT
-                e.id,
-                e.descripcion as nombre,
-                e.sector_id,
-                s.nombre as sector_nombre,
-                e.gerencia_id,
-                g.nombre as gerencia_nombre,
-                puesto.nombre as puesto,
-                e.fechaingreso as tenure_date,
-                (
-                    EXTRACT(YEAR FROM AGE(NOW(), TO_DATE(e.fechaingreso, 'YYYYMMDD'))) * 12
-                    + EXTRACT(MONTH FROM AGE(NOW(), TO_DATE(e.fechaingreso, 'YYYYMMDD')))
-                )::numeric AS tenure_months
-            FROM empleado e
-            LEFT JOIN ud_empleado ude ON ude.id = e.boextension_id
-            LEFT JOIN gerencia g ON g.id = e.gerencia_id
-            LEFT JOIN sector s ON s.id = e.sector_id
-            LEFT JOIN ud_puestoorganigrama puesto ON ude.puestoorganigrama_id = puesto.id
-            WHERE puesto.dependencia_id  = (
-                SELECT puesto1.id FROM ud_empleado udemp1
-                LEFT JOIN ud_puestoorganigrama puesto1 ON udemp1.puestoorganigrama_id = puesto1.id
-                WHERE usuario_sistema = $1
-            )
-            AND e.activestatus = 0
-            ORDER BY e.descripcion ASC
-        `, [username]);
-
-        return result.rows;
-    } catch (err) {
-        console.log('Error obtener reportes directos:', err);
-        return [];
-    }
-}
 
 // GET: Obtener listado de registros 9-box (propios + subordinados en lectura)
 router.get("/nuevebox", requireAuth, async(req, res) => {
