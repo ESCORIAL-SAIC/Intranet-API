@@ -355,53 +355,6 @@ router.get("/rrhh-formularios/riesgo-impacto/:id", requireAuth, async(req, res) 
     }
 });
 
-router.post("/rrhh-formularios/riesgo-impacto", requireAuth, async(req, res) => {
-    try {
-        if (!(await requireAdminRRHH(req, res))) return;
-
-        const { empleado_id, ciclo_id, evaluador, antiguedad, fecha, respuestas_riesgo, contexto_riesgo, respuestas_impacto, contexto_impacto } = req.body;
-        const username = req.user.username;
-
-        if (!empleado_id || !ciclo_id) {
-            return res.status(400).json({ error: "empleado_id y ciclo_id son requeridos" });
-        }
-
-        const cicloData = await pool.query("SELECT * FROM web.ciclo_formulario_rrhh WHERE id = $1 AND tipo = 'riesgo_impacto'", [ciclo_id]);
-        if (cicloData.rows.length === 0) {
-            return res.status(404).json({ error: "Ciclo no encontrado" });
-        }
-        const anio = new Date(cicloData.rows[0].fecha_desde).getFullYear();
-
-        const puestoSnapshot = await obtenerPuestoSnapshot(empleado_id);
-        const registroId = crypto.randomUUID();
-
-        let registroResult;
-        try {
-            registroResult = await pool.query(
-                `INSERT INTO web.formulario_riesgo_impacto
-                 (id, ciclo_id, empleado_id, anio, puesto_snapshot, evaluador, antiguedad, fecha,
-                  respuestas_riesgo, contexto_riesgo, respuestas_impacto, contexto_impacto, estado, creado_por, fecha_creacion)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'borrador', $13, NOW()) RETURNING *`,
-                [
-                    registroId, ciclo_id, empleado_id, anio, puestoSnapshot, evaluador || null, antiguedad || null, fecha || null,
-                    JSON.stringify(respuestas_riesgo || {}), contexto_riesgo || null,
-                    JSON.stringify(respuestas_impacto || {}), contexto_impacto || null, username
-                ]
-            );
-        } catch (err) {
-            if (err.code === '23505') {
-                return res.status(409).json({ error: "Ya existe un registro de Riesgo e Impacto de Pérdida para ese empleado en ese ciclo" });
-            }
-            throw err;
-        }
-
-        res.status(201).json({ registro: registroResult.rows[0] });
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ error: "Error creando el registro de Riesgo e Impacto de Pérdida" });
-    }
-});
-
 router.put("/rrhh-formularios/riesgo-impacto/:id", requireAuth, async(req, res) => {
     try {
         const registroId = req.params.id;
@@ -534,53 +487,6 @@ router.get("/rrhh-formularios/guia-potencial/:id", requireAuth, async(req, res) 
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Error obteniendo el registro" });
-    }
-});
-
-router.post("/rrhh-formularios/guia-potencial", requireAuth, async(req, res) => {
-    try {
-        if (!(await requireAdminRRHH(req, res))) return;
-
-        const { empleado_id, ciclo_id, evaluador, antiguedad_rol, fecha, fit_score, perfil_predominante, dimensiones, potencial_global, proyeccion_rol, observaciones } = req.body;
-        const username = req.user.username;
-
-        if (!empleado_id || !ciclo_id) {
-            return res.status(400).json({ error: "empleado_id y ciclo_id son requeridos" });
-        }
-
-        const cicloData = await pool.query("SELECT * FROM web.ciclo_formulario_rrhh WHERE id = $1 AND tipo = 'guia_potencial'", [ciclo_id]);
-        if (cicloData.rows.length === 0) {
-            return res.status(404).json({ error: "Ciclo no encontrado" });
-        }
-        const anio = new Date(cicloData.rows[0].fecha_desde).getFullYear();
-
-        const puestoSnapshot = await obtenerPuestoSnapshot(empleado_id);
-        const registroId = crypto.randomUUID();
-
-        let registroResult;
-        try {
-            registroResult = await pool.query(
-                `INSERT INTO web.formulario_guia_potencial
-                 (id, ciclo_id, empleado_id, anio, puesto_snapshot, evaluador, antiguedad_rol, fecha, fit_score, perfil_predominante,
-                  dimensiones, potencial_global, proyeccion_rol, observaciones, estado, creado_por, fecha_creacion)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'borrador', $15, NOW()) RETURNING *`,
-                [
-                    registroId, ciclo_id, empleado_id, anio, puestoSnapshot, evaluador || null, antiguedad_rol || null, fecha || null,
-                    fit_score ?? null, perfil_predominante || null, JSON.stringify(dimensiones || {}),
-                    potencial_global || null, proyeccion_rol || null, observaciones || null, username
-                ]
-            );
-        } catch (err) {
-            if (err.code === '23505') {
-                return res.status(409).json({ error: "Ya existe un registro de Guía de Potencial para ese empleado en ese ciclo" });
-            }
-            throw err;
-        }
-
-        res.status(201).json({ registro: registroResult.rows[0] });
-    } catch (err) {
-        console.log(err);
-        res.status(500).json({ error: "Error creando el registro de Guía de Potencial" });
     }
 });
 
