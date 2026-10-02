@@ -28,6 +28,7 @@ app.use(require('./modules/capacitacion/capacitacion.routes'));
 app.use(require('./modules/conclave/conclave.routes'));
 app.use(require('./modules/objetivos-gerencias/objetivos-gerencias.routes'));
 app.use(require('./modules/objetivos-anuales/objetivos-anuales.routes'));
+app.use(require('./modules/rrhh-induccion/rrhh-induccion.routes'));
 app.use(require('./modules/nuevebox/nuevebox.routes'));
 app.use(require('./modules/genoma/genoma.routes'));
 app.use(require('./modules/cvs/cvs.routes'));
