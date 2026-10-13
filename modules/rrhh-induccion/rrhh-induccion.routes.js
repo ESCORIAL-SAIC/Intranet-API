@@ -203,6 +203,37 @@ router.get("/induccion/empleados-nuevos", requireAuth, async(req, res) => {
     }
 });
 
+// Buscador de empleados activos (selección del facilitador de cada inducción).
+router.get("/induccion/empleados/buscar", requireAuth, async(req, res) => {
+    try {
+        if (!(await requireRRHH(req, res))) return;
+        const texto = String(req.query.q || '').trim();
+        if (texto.length < 2) {
+            return res.json({ empleados: [] });
+        }
+        const result = await pool.query(`
+            SELECT
+                e.id,
+                e.descripcion AS nombre,
+                e.codigo AS legajo,
+                puesto.nombre AS puesto,
+                s.nombre AS sector
+            FROM empleado e
+            LEFT JOIN ud_empleado ude ON ude.id = e.boextension_id
+            LEFT JOIN ud_puestoorganigrama puesto ON ude.puestoorganigrama_id = puesto.id
+            LEFT JOIN sector s ON s.id = e.sector_id
+            WHERE e.activestatus = 0
+              AND (e.descripcion ILIKE $1 OR e.codigo::text ILIKE $1)
+            ORDER BY e.descripcion ASC
+            LIMIT 20
+        `, [`%${texto}%`]);
+        res.json({ empleados: result.rows });
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error buscando empleados" });
+    }
+});
+
 // Datos para precargar la sección "Datos del colaborador" del roadmap.
 router.get("/induccion/empleados/:id/datos", requireAuth, async(req, res) => {
     try {
