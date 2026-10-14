@@ -32,6 +32,7 @@ app.use(require('./modules/nuevebox/nuevebox.routes'));
 app.use(require('./modules/genoma/genoma.routes'));
 app.use(require('./modules/cvs/cvs.routes'));
 app.use(require('./modules/chat-agentes/chat-agentes.routes'));
+app.use(require('./modules/estructura-productos/estructura-productos.routes'));
 
 /* PUERTO */
 
