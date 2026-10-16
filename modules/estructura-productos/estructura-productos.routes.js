@@ -21,26 +21,39 @@ const SEGMENTO4_PT_ID = 'feb70f5e-9ec8-4226-870b-7b7f2d51965b';
 const REUSE_MAX_CODIGOS = 2000;
 const REUSE_BATCH = 5;
 
-// GET /estructura-productos/productos?q=texto — autocompletar productos terminados por código o descripción
+// GET /estructura-productos/productos?q=texto — autocompletar productos por código o descripción.
+// Devuelve los PT raíz (sin padres) y cualquier componente que tenga estructura propia,
+// con tipo 'PT' o 'COMP'. Los PT primero.
 router.get("/estructura-productos/productos", requireAuth, async(req, res) => {
     const q = (req.query.q || '').trim();
     try {
         const result = await pool.query(`
-            SELECT p.codigo::text AS codigo, p.descripcion::text AS descripcion
+            SELECT p.codigo::text AS codigo,
+                   p.descripcion::text AS descripcion,
+                   CASE WHEN ud.tipoproduccion = 'PT' THEN 'PT' ELSE 'COMP' END AS tipo
             FROM public.producto p
             LEFT JOIN public.segmento seg ON seg.id = p.segmento_id
             LEFT JOIN public.ud_producto ud ON ud.id = p.boextension_id
             WHERE p.activestatus = 0
-              AND NOT EXISTS (
-                SELECT 1 FROM public.itemcomponente ic
-                JOIN public.defprocesoproductivo dp ON dp.componentes_id = ic.bo_place_id
-                WHERE ic.componente_id = p.id AND dp.activestatus = 0
+              AND (
+                -- PT raíz: filtro de segmento y tipoproduccion estrictos
+                (ud.tipoproduccion = 'PT'
+                 AND seg.segmento4_id = $1
+                 AND NOT EXISTS (
+                   SELECT 1 FROM public.itemcomponente ic
+                   JOIN public.defprocesoproductivo dp ON dp.componentes_id = ic.bo_place_id
+                   WHERE ic.componente_id = p.id AND dp.activestatus = 0
+                 ))
+                OR
+                -- Componente con hijos propios: sin restricción de segmento
+                EXISTS (
+                  SELECT 1 FROM public.defprocesoproductivo dp
+                  WHERE dp.producto_id = p.id AND dp.activestatus = 0
+                )
               )
-              AND seg.segmento4_id = $1
-              AND ud.tipoproduccion = 'PT'
               AND ($2 = '' OR LOWER(p.codigo::text) LIKE LOWER('%' || $2 || '%')
                            OR LOWER(p.descripcion::text) LIKE LOWER('%' || $2 || '%'))
-            ORDER BY p.codigo
+            ORDER BY (ud.tipoproduccion = 'PT') DESC NULLS LAST, p.codigo
             LIMIT ${q ? 30 : 50}
         `, [SEGMENTO4_PT_ID, q]);
         res.json(result.rows);
@@ -52,7 +65,7 @@ router.get("/estructura-productos/productos", requireAuth, async(req, res) => {
 
 // GET /estructura-productos/estructura?codigo=CODIGO
 // BOM completo con costo unitario y costo acumulado (cantidad propagada desde la raíz).
-// El costo vigente es el más reciente con activestatus = 0 sin filtro de fecha de expiración.
+// El costo es el precio activo vigente hoy (desdefecha <= hoy y hastafecha vacía o >= hoy) más reciente.
 router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
     const codigo = (req.query.codigo || '').trim();
     if (!codigo) return res.status(400).json({ error: "Falta parámetro codigo" });
@@ -124,6 +137,8 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
                 WHERE pr.referencia_id = e.hijo_id
                   AND pr.bo_place_id   = $2
                   AND pr.activestatus  = 0
+                  AND LEFT(pr.desdefecha, 8)::date <= CURRENT_DATE
+                  AND (pr.hastafecha IS NULL OR LEFT(pr.hastafecha, 8)::date >= CURRENT_DATE)
                 ORDER BY LEFT(pr.desdefecha, 8)::date DESC NULLS LAST
                 LIMIT 1
             ) p ON true
