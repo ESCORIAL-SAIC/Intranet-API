@@ -12,11 +12,20 @@ const router = express.Router();
    Al crear uno, elige al colaborador de un listado de ingresos recientes (tabla empleado).
    El colaborador ve su roadmap publicado en Perfil (/induccion/mi-induccion) y, cuando
    completó todas las inducciones, responde la encuesta de satisfacción que cierra el
-   proceso. Esquema en RRHH_INDUCCION_DDL.sql. */
+   proceso. Cada inducción puede tener asignada una evaluación de Forms (RRHH la marca como
+   realizada) y, a los 30 días del ingreso, se habilita la encuesta de 1.er mes (Forms; la
+   marca el colaborador o RRHH). Esquema en RRHH_INDUCCION_DDL.sql (+ _V2_DDL.sql). */
 
 const GRUPO_RRHH = "'rrhh'";
 
 const TIPOS = ['estandar', 'jefatura'];
+
+// Evaluaciones de Forms asignables a una inducción (una por inducción). Los links están en el
+// frontend (RRHHInduccion/constants.js -> EVALUACIONES); acá solo se validan los códigos.
+const EVALUACIONES = ['rrhh', 'ssma', 'calidad'];
+
+// La encuesta de 1.er mes se habilita a estos días de la fecha de ingreso.
+const DIAS_ENCUESTA_1MES = 30;
 
 // Ventana (en días desde la fecha de ingreso) para considerar a un empleado como "nuevo".
 // empleado no tiene timestamp de alta: se usa fechaingreso (texto 'YYYYMMDD').
@@ -31,17 +40,83 @@ async function requireRRHH(req, res) {
     return true;
 }
 
+// Fechas como texto 'YYYY-MM-DD' en hora local del servidor (las de la base llegan así vía TO_CHAR).
+function fechaISO(fecha) {
+    const mes = String(fecha.getMonth() + 1).padStart(2, '0');
+    const dia = String(fecha.getDate()).padStart(2, '0');
+    return `${fecha.getFullYear()}-${mes}-${dia}`;
+}
+
+function sumarDias(fecha, dias) {
+    const [anio, mes, dia] = fecha.split('-').map(Number);
+    return fechaISO(new Date(anio, mes - 1, dia + dias));
+}
+
+function ordenCronologico(a, b) {
+    const claveA = a.fecha ? `${a.fecha} ${a.horario || '99:99'}` : null;
+    const claveB = b.fecha ? `${b.fecha} ${b.horario || '99:99'}` : null;
+    if (claveA && claveB && claveA !== claveB) return claveA < claveB ? -1 : 1;
+    if (claveA && !claveB) return -1;
+    if (!claveA && claveB) return 1;
+    return a.orden - b.orden;
+}
+
+// Progreso: inducciones + evaluaciones asignadas + encuesta de satisfacción (todo lo que hace
+// falta para finalizar). La encuesta de 1.er mes se sigue aparte: llega después de finalizar.
 function calcularProgreso(items, encuestaCompletada) {
-    const total = items.length + 1; // inducciones + encuesta
-    const completadas = items.filter(i => i.completada).length + (encuestaCompletada ? 1 : 0);
+    const conEvaluacion = items.filter(i => i.evaluacion_tipo);
+    const total = items.length + conEvaluacion.length + 1;
+    const completadas = items.filter(i => i.completada).length
+        + conEvaluacion.filter(i => i.evaluacion_completada).length
+        + (encuestaCompletada ? 1 : 0);
     return { total, completadas, porcentaje: Math.round((completadas / total) * 100) };
+}
+
+function estadoEncuesta1Mes(roadmap) {
+    const base = roadmap.fecha_ingreso || (roadmap.fecha_publicacion ? fechaISO(new Date(roadmap.fecha_publicacion)) : null);
+    const disponibleDesde = base ? sumarDias(base, DIAS_ENCUESTA_1MES) : null;
+    let estado = 'no_corresponde';
+    if (roadmap.encuesta_1mes_completada) estado = 'completada';
+    else if (roadmap.estado !== 'borrador' && disponibleDesde && fechaISO(new Date()) >= disponibleDesde) estado = 'pendiente';
+    return { estado, disponible_desde: disponibleDesde, fecha: roadmap.encuesta_1mes_fecha };
+}
+
+// Datos derivados para el seguimiento de RRHH (indicadores y columnas del tablero) y el Perfil.
+function resumirRoadmap(roadmap, items) {
+    const hoy = fechaISO(new Date());
+    const ordenados = [...items].sort(ordenCronologico);
+    const pendientes = ordenados.filter(i => !i.completada);
+    const evaluacionesPendientes = ordenados.filter(i => i.completada && i.evaluacion_tipo && !i.evaluacion_completada);
+    const atrasadas = pendientes.filter(i => i.fecha && i.fecha < hoy);
+
+    let proximoPendiente = null;
+    if (roadmap.estado !== 'borrador') {
+        if (pendientes.length > 0) {
+            const i = pendientes[0];
+            proximoPendiente = { tipo: 'induccion', nombre: i.nombre, fecha: i.fecha, horario: i.horario, atrasada: !!(i.fecha && i.fecha < hoy) };
+        } else if (evaluacionesPendientes.length > 0) {
+            const i = evaluacionesPendientes[0];
+            proximoPendiente = { tipo: 'evaluacion', nombre: i.nombre, evaluacion_tipo: i.evaluacion_tipo };
+        } else if (!roadmap.encuesta_completada) {
+            proximoPendiente = { tipo: 'encuesta', nombre: 'Encuesta de satisfacción' };
+        }
+    }
+
+    return {
+        progreso: calcularProgreso(items, roadmap.encuesta_completada),
+        proximo_pendiente: proximoPendiente,
+        actividades_atrasadas: atrasadas.length,
+        evaluaciones_pendientes: evaluacionesPendientes.length,
+        encuesta_1mes: estadoEncuesta1Mes(roadmap),
+    };
 }
 
 async function obtenerItems(roadmapId, client = pool) {
     const result = await client.query(
         `SELECT id, roadmap_id, catalogo_id, orden, nombre,
                 TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha, TO_CHAR(horario, 'HH24:MI') AS horario,
-                duracion_min, ubicacion, facilitador, material_url, requiere_evaluacion, evaluacion_url,
+                duracion_min, ubicacion, facilitador, material_url,
+                evaluacion_tipo, evaluacion_completada, evaluacion_fecha, evaluacion_marcada_por,
                 observaciones, completada, fecha_completada, completada_por
          FROM web.induccion_roadmap_item WHERE roadmap_id = $1 ORDER BY orden ASC`,
         [roadmapId]
@@ -58,22 +133,42 @@ async function obtenerRoadmapCompleto(roadmapId) {
     if (result.rows.length === 0) return null;
     const roadmap = result.rows[0];
     const items = await obtenerItems(roadmapId);
-    return { ...roadmap, items, progreso: calcularProgreso(items, roadmap.encuesta_completada) };
+    return { ...roadmap, items, ...resumirRoadmap(roadmap, items) };
 }
 
-// Pasa a 'finalizado' cuando todo está completo (inducciones + encuesta) y vuelve a
-// 'publicado' si RRHH desmarca algo. Un borrador no cambia de estado acá.
+// Pasa a 'finalizado' cuando todo está completo (inducciones, evaluaciones asignadas y encuesta
+// de satisfacción) y vuelve a 'publicado' si RRHH desmarca algo. Un borrador no cambia acá.
 async function actualizarEstadoFinal(roadmapId, client = pool) {
     await client.query(`
+        WITH calc AS (
+            SELECT r.id,
+                   CASE WHEN r.encuesta_completada AND NOT EXISTS (
+                            SELECT 1 FROM web.induccion_roadmap_item i
+                            WHERE i.roadmap_id = r.id
+                              AND (NOT i.completada OR (i.evaluacion_tipo IS NOT NULL AND NOT i.evaluacion_completada))
+                        ) THEN 'finalizado'
+                        ELSE 'publicado'
+                   END AS nuevo_estado
+            FROM web.induccion_roadmap r
+            WHERE r.id = $1 AND r.estado <> 'borrador'
+        )
         UPDATE web.induccion_roadmap r
-        SET estado = CASE
-                WHEN r.encuesta_completada AND NOT EXISTS (
-                    SELECT 1 FROM web.induccion_roadmap_item i WHERE i.roadmap_id = r.id AND NOT i.completada
-                ) THEN 'finalizado'
-                ELSE 'publicado'
-            END
-        WHERE r.id = $1 AND r.estado <> 'borrador'
+        SET estado = calc.nuevo_estado,
+            fecha_finalizacion = CASE WHEN calc.nuevo_estado = 'finalizado' THEN COALESCE(r.fecha_finalizacion, NOW()) END
+        FROM calc
+        WHERE r.id = calc.id
     `, [roadmapId]);
+}
+
+// Inducción + estado de su roadmap, para los endpoints que marcan una actividad.
+async function obtenerItemConRoadmap(itemId) {
+    const result = await pool.query(`
+        SELECT i.id, i.roadmap_id, i.evaluacion_tipo, r.estado
+        FROM web.induccion_roadmap_item i
+        JOIN web.induccion_roadmap r ON r.id = i.roadmap_id
+        WHERE i.id = $1
+    `, [itemId]);
+    return result.rows[0] || null;
 }
 
 function validarItems(items, estado) {
@@ -87,12 +182,16 @@ function validarItems(items, estado) {
         if (estado === 'publicado' && (!item.fecha || !item.horario)) {
             return `Para publicar, la inducción "${item.nombre}" debe tener fecha y horario`;
         }
+        if (item.evaluacion_tipo && !EVALUACIONES.includes(item.evaluacion_tipo)) {
+            return `Evaluación inválida en la inducción "${item.nombre}"`;
+        }
     }
     return null;
 }
 
 // Inserta o actualiza los items enviados (en el orden recibido) y elimina los que ya no
-// están. Los items existentes conservan su estado de completada.
+// están. Los items existentes conservan su estado de completada; la evaluación vuelve a
+// pendiente si RRHH le cambia el tipo.
 async function guardarItems(client, roadmapId, items) {
     const existentes = await obtenerItems(roadmapId, client);
     const idsExistentes = new Set(existentes.map(i => i.id));
@@ -115,23 +214,26 @@ async function guardarItems(client, roadmapId, items) {
             item.ubicacion || null,
             item.facilitador || null,
             item.material_url || null,
-            !!item.requiere_evaluacion,
-            item.evaluacion_url || null,
+            item.evaluacion_tipo || null,
             item.observaciones || null,
         ];
         if (item.id && idsExistentes.has(item.id)) {
             await client.query(`
                 UPDATE web.induccion_roadmap_item
                 SET orden = $1, nombre = $2, fecha = $3, horario = $4, duracion_min = $5, ubicacion = $6,
-                    facilitador = $7, material_url = $8, requiere_evaluacion = $9, evaluacion_url = $10, observaciones = $11
-                WHERE id = $12 AND roadmap_id = $13
+                    facilitador = $7, material_url = $8, observaciones = $10,
+                    evaluacion_completada  = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_completada ELSE false END,
+                    evaluacion_fecha       = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_fecha END,
+                    evaluacion_marcada_por = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_marcada_por END,
+                    evaluacion_tipo = $9::varchar
+                WHERE id = $11 AND roadmap_id = $12
             `, [...valores, item.id, roadmapId]);
         } else {
             await client.query(`
                 INSERT INTO web.induccion_roadmap_item
                     (id, roadmap_id, catalogo_id, orden, nombre, fecha, horario, duracion_min, ubicacion,
-                     facilitador, material_url, requiere_evaluacion, evaluacion_url, observaciones)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     facilitador, material_url, evaluacion_tipo, observaciones)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             `, [crypto.randomUUID(), roadmapId, item.catalogo_id || null, ...valores]);
         }
     }
@@ -274,23 +376,26 @@ router.get("/induccion/empleados/:id/datos", requireAuth, async(req, res) => {
 router.get("/induccion/roadmaps", requireAuth, async(req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
-        const result = await pool.query(`
+        const roadmapsData = await pool.query(`
             SELECT
                 r.id, r.empleado_id, r.tipo, r.nombre_snapshot, r.legajo_snapshot, r.puesto_snapshot,
-                r.sector, r.planta, TO_CHAR(r.fecha_ingreso, 'YYYY-MM-DD') AS fecha_ingreso, r.estado, r.encuesta_completada, r.fecha_creacion,
-                COUNT(i.id)::integer AS total_inducciones,
-                COUNT(i.id) FILTER (WHERE i.completada)::integer AS inducciones_completadas,
-                TO_CHAR(MIN(i.fecha) FILTER (WHERE NOT i.completada), 'YYYY-MM-DD') AS proxima_fecha
+                r.sector, r.planta, TO_CHAR(r.fecha_ingreso, 'YYYY-MM-DD') AS fecha_ingreso, r.tutor_rrhh,
+                r.estado, r.encuesta_completada, r.encuesta_1mes_completada, r.encuesta_1mes_fecha,
+                r.fecha_publicacion, r.fecha_finalizacion, r.fecha_creacion
             FROM web.induccion_roadmap r
-            LEFT JOIN web.induccion_roadmap_item i ON i.roadmap_id = r.id
-            GROUP BY r.id
             ORDER BY r.fecha_creacion DESC
         `);
-        const roadmaps = result.rows.map(r => {
-            const total = r.total_inducciones + 1;
-            const completadas = r.inducciones_completadas + (r.encuesta_completada ? 1 : 0);
-            return { ...r, progreso: { total, completadas, porcentaje: Math.round((completadas / total) * 100) } };
-        });
+        const itemsData = await pool.query(`
+            SELECT roadmap_id, orden, nombre,
+                   TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha, TO_CHAR(horario, 'HH24:MI') AS horario,
+                   completada, evaluacion_tipo, evaluacion_completada
+            FROM web.induccion_roadmap_item
+        `);
+        const itemsPorRoadmap = {};
+        for (const item of itemsData.rows) {
+            (itemsPorRoadmap[item.roadmap_id] = itemsPorRoadmap[item.roadmap_id] || []).push(item);
+        }
+        const roadmaps = roadmapsData.rows.map(r => ({ ...r, ...resumirRoadmap(r, itemsPorRoadmap[r.id] || []) }));
         res.json({ roadmaps });
     } catch (err) {
         console.log(err);
@@ -435,16 +540,10 @@ router.put("/induccion/items/:id/completada", requireAuth, async(req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
 
-        const itemData = await pool.query(`
-            SELECT i.id, i.roadmap_id, r.estado
-            FROM web.induccion_roadmap_item i
-            JOIN web.induccion_roadmap r ON r.id = i.roadmap_id
-            WHERE i.id = $1
-        `, [req.params.id]);
-        if (itemData.rows.length === 0) {
+        const item = await obtenerItemConRoadmap(req.params.id);
+        if (!item) {
             return res.status(404).json({ error: "Inducción no encontrada" });
         }
-        const item = itemData.rows[0];
         if (item.estado === 'borrador') {
             return res.status(400).json({ error: "Publicá el roadmap antes de registrar inducciones completadas" });
         }
@@ -463,6 +562,70 @@ router.put("/induccion/items/:id/completada", requireAuth, async(req, res) => {
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Error actualizando la inducción" });
+    }
+});
+
+// RRHH marca/desmarca como realizada la evaluación (Forms) asignada a una inducción.
+router.put("/induccion/items/:id/evaluacion", requireAuth, async(req, res) => {
+    try {
+        if (!(await requireRRHH(req, res))) return;
+
+        const item = await obtenerItemConRoadmap(req.params.id);
+        if (!item) {
+            return res.status(404).json({ error: "Inducción no encontrada" });
+        }
+        if (!item.evaluacion_tipo) {
+            return res.status(400).json({ error: "La inducción no tiene una evaluación asignada" });
+        }
+        if (item.estado === 'borrador') {
+            return res.status(400).json({ error: "Publicá el roadmap antes de registrar evaluaciones" });
+        }
+
+        const completada = !!req.body.completada;
+        await pool.query(`
+            UPDATE web.induccion_roadmap_item
+            SET evaluacion_completada = $1,
+                evaluacion_fecha = CASE WHEN $1 THEN NOW() END,
+                evaluacion_marcada_por = CASE WHEN $1 THEN $2 END
+            WHERE id = $3
+        `, [completada, req.user.username, item.id]);
+        await actualizarEstadoFinal(item.roadmap_id);
+
+        res.json({ roadmap: await obtenerRoadmapCompleto(item.roadmap_id) });
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error actualizando la evaluación" });
+    }
+});
+
+async function marcarEncuesta1Mes(roadmapId, completada, username) {
+    await pool.query(`
+        UPDATE web.induccion_roadmap
+        SET encuesta_1mes_completada = $1,
+            encuesta_1mes_fecha = CASE WHEN $1 THEN NOW() END,
+            encuesta_1mes_marcada_por = CASE WHEN $1 THEN $2 END
+        WHERE id = $3
+    `, [completada, username, roadmapId]);
+}
+
+// RRHH marca/desmarca la encuesta de 1.er mes (Forms externo) como respondida.
+router.put("/induccion/roadmaps/:id/encuesta-1mes", requireAuth, async(req, res) => {
+    try {
+        if (!(await requireRRHH(req, res))) return;
+
+        const roadmap = await obtenerRoadmapCompleto(req.params.id);
+        if (!roadmap) {
+            return res.status(404).json({ error: "Roadmap no encontrado" });
+        }
+        if (roadmap.estado === 'borrador') {
+            return res.status(400).json({ error: "Publicá el roadmap antes de registrar la encuesta de 1.er mes" });
+        }
+
+        await marcarEncuesta1Mes(roadmap.id, !!req.body.completada, req.user.username);
+        res.json({ roadmap: await obtenerRoadmapCompleto(roadmap.id) });
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error actualizando la encuesta de 1.er mes" });
     }
 });
 
@@ -517,6 +680,25 @@ router.post("/induccion/mi-induccion/encuesta", requireAuth, async(req, res) => 
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Error guardando la encuesta" });
+    }
+});
+
+// El colaborador indica que ya respondió la encuesta de 1.er mes (Forms externo).
+router.post("/induccion/mi-induccion/encuesta-1mes", requireAuth, async(req, res) => {
+    try {
+        const roadmap = await obtenerRoadmapDelUsuario(req.user.username);
+        if (!roadmap) {
+            return res.status(404).json({ error: "No tenés un roadmap de inducción publicado" });
+        }
+        if (roadmap.encuesta_1mes.estado !== 'pendiente') {
+            return res.status(400).json({ error: "La encuesta de 1.er mes no está disponible" });
+        }
+
+        await marcarEncuesta1Mes(roadmap.id, true, req.user.username);
+        res.json({ roadmap: await obtenerRoadmapCompleto(roadmap.id) });
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error guardando la encuesta de 1.er mes" });
     }
 });
 
