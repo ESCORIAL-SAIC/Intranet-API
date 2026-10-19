@@ -1,6 +1,7 @@
 const express = require("express");
 const { pool } = require("../../config/db");
 const requireAuth = require("../../middleware/requireAuth");
+const { perteneceGrupo } = require("../../shared/grupos");
 
 const router = express.Router();
 
@@ -20,6 +21,23 @@ const SEGMENTO4_PT_ID = 'feb70f5e-9ec8-4226-870b-7b7f2d51965b';
 // (el pool es compartido con el resto de la intranet: no acaparar conexiones)
 const REUSE_MAX_CODIGOS = 2000;
 const REUSE_BATCH = 5;
+
+// Solo estos grupos ven los costos; al resto la estructura se le devuelve sin precios
+const GRUPOS_COSTOS = "'rol_estructura_producto_costo','administradores'";
+
+function puedeVerCostos(req) {
+    return perteneceGrupo({ username: req.user.username, grupousuario: GRUPOS_COSTOS });
+}
+
+// GET /estructura-productos/permisos — qué puede ver el usuario en la solapa
+router.get("/estructura-productos/permisos", requireAuth, async(req, res) => {
+    try {
+        res.json({ ver_costos: await puedeVerCostos(req) });
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error obteniendo los permisos" });
+    }
+});
 
 // GET /estructura-productos/productos?q=texto — autocompletar productos por código o descripción.
 // Devuelve los PT raíz (sin padres) y cualquier componente que tenga estructura propia,
@@ -148,7 +166,9 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
         if (!result.rows.length) {
             return res.status(404).json({ error: "Producto no encontrado o sin estructura activa" });
         }
-        const num = (v) => v != null ? parseFloat(v) : null;
+        // Sin permiso de costos los campos de precio van siempre en null
+        const verCostos = await puedeVerCostos(req);
+        const num = (v) => verCostos && v != null ? parseFloat(v) : null;
         res.json(result.rows.map(row => ({
             nivel:           parseInt(row.nivel),
             padre:           row.padre,
@@ -160,7 +180,7 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
             costo_unitario:  num(row.costo_unitario),
             costo_nivel:     num(row.costo_nivel),
             costo_acumulado: num(row.costo_acumulado),
-            moneda:          row.moneda || null,
+            moneda:          verCostos ? row.moneda || null : null,
         })));
     } catch (err) {
         console.log(err);
