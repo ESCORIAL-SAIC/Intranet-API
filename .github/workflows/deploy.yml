@@ -1,0 +1,92 @@
+# Deploy de la API a pdc03 (Windows Server + IIS/iisnode).
+# Corre en el runner self-hosted instalado en pdc03 con la etiqueta "pdc03".
+# El servicio del runner necesita permisos para frenar/arrancar el app pool (appcmd).
+#
+# Variables del repo (Settings > Secrets and variables > Actions > Variables):
+#   API_DEPLOY_PATH     carpeta del sitio de IIS donde esta server.js, ej: C:\inetpub\intranet-api
+#   API_APP_POOL        nombre del application pool de IIS de la API
+#   DEPLOY_BACKUP_PATH  carpeta de backups, ej: C:\deploy-backups
+#   API_HEALTH_URL      (opcional) URL que tiene que responder despues del deploy
+#
+# Nunca se tocan en el servidor: .env, node_modules (se reinstala), files\ (lo escribe
+# la app en runtime), iisnode\ (logs) y *.log.
+
+name: Deploy API
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [ self-hosted, Windows, pdc03 ]
+    defaults:
+      run:
+        shell: powershell
+    env:
+      DEPLOY_PATH: ${{ vars.API_DEPLOY_PATH }}
+      APP_POOL: ${{ vars.API_APP_POOL }}
+      BACKUP_ROOT: ${{ vars.DEPLOY_BACKUP_PATH }}
+      APPCMD: C:\Windows\System32\inetsrv\appcmd.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar configuracion
+        run: |
+          if (-not $env:DEPLOY_PATH) { throw "Falta la variable API_DEPLOY_PATH" }
+          if (-not $env:APP_POOL)    { throw "Falta la variable API_APP_POOL" }
+          if (-not $env:BACKUP_ROOT) { throw "Falta la variable DEPLOY_BACKUP_PATH" }
+          if (-not (Test-Path (Join-Path $env:DEPLOY_PATH ".env"))) { throw "No existe .env en $env:DEPLOY_PATH" }
+          & $env:APPCMD list apppool /name:$env:APP_POOL
+          if ($LASTEXITCODE -ne 0) { throw "No existe el app pool $env:APP_POOL" }
+          node --version
+          npm --version
+
+      - name: Backup de la version publicada
+        run: |
+          $dest = Join-Path $env:BACKUP_ROOT ("api\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+          robocopy $env:DEPLOY_PATH $dest /E /XD node_modules iisnode /NFL /NDL /NJH /NP
+          if ($LASTEXITCODE -ge 8) { throw "Fallo el backup (robocopy $LASTEXITCODE)" }
+          # Conservar solo los ultimos 10 backups
+          Get-ChildItem (Join-Path $env:BACKUP_ROOT "api") -Directory |
+            Sort-Object Name -Descending | Select-Object -Skip 10 |
+            Remove-Item -Recurse -Force
+          exit 0
+
+      - name: Publicar codigo y reiniciar
+        run: |
+          & $env:APPCMD stop apppool /apppool.name:$env:APP_POOL
+          try {
+            # Esperar a que iisnode suelte los archivos (node.exe del pool)
+            Start-Sleep -Seconds 5
+
+            # /MIR deja el servidor igual al repo, salvo lo excluido con /XD y /XF
+            robocopy . $env:DEPLOY_PATH /MIR /XD .git .github node_modules files iisnode /XF .env *.log /NFL /NDL /NJH /NP
+            if ($LASTEXITCODE -ge 8) { throw "Fallo la copia (robocopy $LASTEXITCODE)" }
+
+            # files\ solo se completa con lo que falte, nunca se pisa lo que escribio la app
+            robocopy files (Join-Path $env:DEPLOY_PATH "files") /E /XC /XN /XO /NFL /NDL /NJH /NP
+            if ($LASTEXITCODE -ge 8) { throw "Fallo la copia de files (robocopy $LASTEXITCODE)" }
+
+            Push-Location $env:DEPLOY_PATH
+            npm ci --omit=dev
+            $npmExit = $LASTEXITCODE
+            Pop-Location
+            if ($npmExit -ne 0) { throw "Fallo npm ci ($npmExit)" }
+          }
+          finally {
+            & $env:APPCMD start apppool /apppool.name:$env:APP_POOL
+          }
+          exit 0
+
+      - name: Verificar que la API responde
+        if: ${{ vars.API_HEALTH_URL != '' }}
+        run: |
+          Start-Sleep -Seconds 5
+          $r = Invoke-WebRequest -Uri "${{ vars.API_HEALTH_URL }}" -UseBasicParsing -TimeoutSec 30
+          Write-Host "HTTP $($r.StatusCode)"
