@@ -14,6 +14,9 @@ const router = express.Router();
 // ID del bo_place de lista de precios/costos en el ERP
 const BOM_PRECIO_PLACE_ID = '{DFB5496F-297E-4644-8821-DA674A47B3EF}';
 
+// ID del bo_place de la serie de cotizaciones del dólar (v_itemconversionfinanciera)
+const BOM_COTIZACION_USD_PLACE_ID = '{9B9915FA-4FA6-11D5-B060-004854841C8A}';
+
 // Segmento 4 de los productos terminados que se listan en el buscador
 const SEGMENTO4_PT_ID = 'feb70f5e-9ec8-4226-870b-7b7f2d51965b';
 
@@ -83,11 +86,14 @@ router.get("/estructura-productos/productos", requireAuth, async(req, res) => {
 
 // GET /estructura-productos/estructura?codigo=CODIGO
 // BOM completo con costo unitario y costo acumulado (cantidad propagada desde la raíz).
-// El costo es el precio activo vigente hoy (desdefecha <= hoy y hastafecha vacía o >= hoy) más reciente.
+// El costo es el precio activo vigente hoy (desdefecha <= hoy y hastafecha vacía o >= hoy) más reciente,
+// y se dolariza con la cotización del día en que se modificó el importe (según v_auditoria).
 router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
     const codigo = (req.query.codigo || '').trim();
     if (!codigo) return res.status(400).json({ error: "Falta parámetro codigo" });
     try {
+        // Sin permiso de costos no se buscan precios ($4 = false) y los campos de costo van en null
+        const verCostos = await puedeVerCostos(req);
         const result = await pool.query(`
             WITH RECURSIVE
             raiz AS (
@@ -145,11 +151,27 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
                 p.costo_unitario,
                 ROUND((p.costo_unitario * e.cants[e.nivel])::numeric, 4) AS costo_nivel,
                 ROUND((p.costo_unitario * e.qty_acum)::numeric, 4)       AS costo_acumulado,
-                p.moneda
+                p.moneda,
+                to_char(p.fecha_ult_modif, 'YYYY-MM-DD')                 AS fecha_precio,
+                fx.cotizacion                                            AS cotizacion_usd,
+                ROUND((p.costo_unitario / d.divisor_usd)::numeric, 4)                  AS costo_unitario_usd,
+                ROUND((p.costo_unitario * e.cants[e.nivel] / d.divisor_usd)::numeric, 4) AS costo_nivel_usd,
+                ROUND((p.costo_unitario * e.qty_acum / d.divisor_usd)::numeric, 4)       AS costo_acumulado_usd
             FROM est e
             LEFT JOIN LATERAL (
                 SELECT pr.inicial2_importe::numeric AS costo_unitario,
-                       uf.nombre::text              AS moneda
+                       uf.nombre::text              AS moneda,
+                       -- Fecha real de la última modificación del importe, desde la auditoría
+                       (
+                           SELECT LEFT(au.fecha, 8)::date
+                           FROM public.v_auditoria au
+                           WHERE au.objeto_id = pr.id
+                             AND au.entidad   = 'Precio'
+                             AND au.atributo  = 'Precio final - Importe'
+                             AND au.accion    = 'Modificación'
+                           ORDER BY au.fecha DESC
+                           LIMIT 1
+                       ) AS fecha_ult_modif
                 FROM public.v_precio pr
                 LEFT JOIN public.v_unidadfinanciera uf ON pr.valor2_unidadvalorizacion_id = uf.id
                 WHERE pr.referencia_id = e.hijo_id
@@ -159,15 +181,29 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
                   AND (pr.hastafecha IS NULL OR LEFT(pr.hastafecha, 8)::date >= CURRENT_DATE)
                 ORDER BY LEFT(pr.desdefecha, 8)::date DESC NULLS LAST
                 LIMIT 1
-            ) p ON true
+            ) p ON $4
+            -- Cotización (pesos por dólar) del día en que se actualizó el precio
+            LEFT JOIN LATERAL (
+                SELECT ROUND(ic.relacionconversion::numeric, 2) AS cotizacion
+                FROM public.v_itemconversionfinanciera ic
+                WHERE ic.bo_place_id = $3
+                  AND LEFT(ic.fecha, 8)::date <= p.fecha_ult_modif
+                ORDER BY ic.fecha DESC
+                LIMIT 1
+            ) fx ON (p.fecha_ult_modif IS NOT NULL)
+            -- Dolarización: precio en Pesos ÷ cotización; un precio en otra moneda ya está en USD
+            LEFT JOIN LATERAL (
+                SELECT CASE
+                         WHEN p.moneda = 'Pesos' AND fx.cotizacion > 0 THEN fx.cotizacion
+                         WHEN p.moneda <> 'Pesos' THEN 1
+                       END AS divisor_usd
+            ) d ON true
             ORDER BY e.ruta
-        `, [codigo, BOM_PRECIO_PLACE_ID]);
+        `, [codigo, BOM_PRECIO_PLACE_ID, BOM_COTIZACION_USD_PLACE_ID, verCostos]);
 
         if (!result.rows.length) {
             return res.status(404).json({ error: "Producto no encontrado o sin estructura activa" });
         }
-        // Sin permiso de costos los campos de precio van siempre en null
-        const verCostos = await puedeVerCostos(req);
         const num = (v) => verCostos && v != null ? parseFloat(v) : null;
         res.json(result.rows.map(row => ({
             nivel:           parseInt(row.nivel),
@@ -181,6 +217,11 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
             costo_nivel:     num(row.costo_nivel),
             costo_acumulado: num(row.costo_acumulado),
             moneda:          verCostos ? row.moneda || null : null,
+            fecha_precio:        verCostos ? row.fecha_precio || null : null,
+            cotizacion_usd:      num(row.cotizacion_usd),
+            costo_unitario_usd:  num(row.costo_unitario_usd),
+            costo_nivel_usd:     num(row.costo_nivel_usd),
+            costo_acumulado_usd: num(row.costo_acumulado_usd),
         })));
     } catch (err) {
         console.log(err);
