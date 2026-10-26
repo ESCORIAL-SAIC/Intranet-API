@@ -1,0 +1,82 @@
+# Deploy de la API al servidor Docker de la intranet.
+# Corre en el runner self-hosted instalado en ese servidor (etiqueta "intranet"):
+# construye la imagen ahi mismo, actualiza /opt/docker/intranet/docker-compose.yml
+# desde deploy/ y reinicia solo el contenedor "api". Si el contenedor nuevo no
+# queda healthy, vuelve a levantar la imagen anterior.
+
+name: Deploy API
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [ self-hosted, Linux, intranet ]
+    env:
+      STACK_DIR: /opt/docker/intranet
+      SERVICE: api
+      IMAGE: intranet-api
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar servidor
+        run: |
+          set -euo pipefail
+          test -d "$STACK_DIR"           || { echo "::error::No existe $STACK_DIR"; exit 1; }
+          test -w "$STACK_DIR"           || { echo "::error::El runner no puede escribir en $STACK_DIR"; exit 1; }
+          test -f "$STACK_DIR/api.env"   || { echo "::error::Falta $STACK_DIR/api.env"; exit 1; }
+          test -d "$STACK_DIR/api-files" || { echo "::error::Falta $STACK_DIR/api-files"; exit 1; }
+          docker version --format 'Docker {{.Server.Version}}'
+
+      - name: Build de la imagen
+        run: docker build --pull -t "$IMAGE:candidate" .
+
+      - name: Actualizar docker-compose.yml del servidor
+        run: install -m 644 deploy/docker-compose.yml "$STACK_DIR/docker-compose.yml"
+
+      - name: Levantar la version nueva
+        working-directory: ${{ env.STACK_DIR }}
+        run: |
+          set -euo pipefail
+          if docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
+            docker tag "$IMAGE:latest" "$IMAGE:previous"
+          fi
+          docker tag "$IMAGE:candidate" "$IMAGE:latest"
+          docker compose up -d --no-deps "$SERVICE"
+
+      - name: Esperar healthcheck (rollback si falla)
+        working-directory: ${{ env.STACK_DIR }}
+        run: |
+          set -uo pipefail
+          deadline=$((SECONDS + 150))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status=$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q "$SERVICE")" 2>/dev/null || echo unknown)
+            echo "Estado: $status"
+            case "$status" in
+              healthy) exit 0 ;;
+              unhealthy) break ;;
+            esac
+            sleep 5
+          done
+          echo "::error::$SERVICE no quedo healthy, vuelvo a la version anterior"
+          docker compose logs --tail 100 "$SERVICE"
+          if docker image inspect "$IMAGE:previous" >/dev/null 2>&1; then
+            docker tag "$IMAGE:previous" "$IMAGE:latest"
+            docker compose up -d --no-deps "$SERVICE"
+          fi
+          exit 1
+
+      - name: Limpiar imagenes viejas
+        if: always()
+        run: |
+          docker rmi "$IMAGE:candidate" >/dev/null 2>&1 || true
+          docker image prune -f

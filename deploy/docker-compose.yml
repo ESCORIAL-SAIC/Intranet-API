@@ -1,0 +1,54 @@
+# Stack de produccion de la intranet: /opt/docker/intranet/docker-compose.yml
+#
+# Este archivo vive en el repo Intranet-API y el workflow de deploy de la API
+# lo copia al servidor en cada deploy: no editarlo a mano en el servidor.
+#
+# Las imagenes no se bajan de ningun registry: las construyen en el propio
+# servidor los workflows de cada repo (intranet-api:latest e intranet-web:latest).
+#
+# Archivos en /opt/docker/intranet que NO estan en git:
+#   .env       variables de este compose (ver deploy/.env.example)
+#   api.env    variables de la API: DB, JWT, OpenAI (el .env de la API)
+#   api-files/ datos que la API escribe en runtime (files/ del repo)
+
+name: intranet
+
+services:
+  api:
+    image: intranet-api:latest
+    pull_policy: never
+    restart: unless-stopped
+    env_file:
+      - ./api.env
+    environment:
+      PORT: 2223
+      NODE_ENV: production
+      # node-cron usa la hora local del contenedor
+      TZ: America/Argentina/Buenos_Aires
+    volumes:
+      - ./api-files:/app/files
+    # Sin puertos publicados: se accede a traves de "web" en /api/.
+    # Si algo externo necesita pegarle directo, descomentar:
+    # ports:
+    #   - "${API_PORT:-2223}:2223"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(2223,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  web:
+    image: intranet-web:latest
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      TZ: America/Argentina/Buenos_Aires
+    ports:
+      - "${INTRANET_PORT:-80}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
