@@ -87,7 +87,8 @@ router.get("/estructura-productos/productos", requireAuth, async(req, res) => {
 // GET /estructura-productos/estructura?codigo=CODIGO
 // BOM completo con costo unitario y costo acumulado (cantidad propagada desde la raíz).
 // El costo es el precio activo vigente hoy (desdefecha <= hoy y hastafecha vacía o >= hoy) más reciente,
-// y se dolariza con la cotización del día en que se modificó el importe (según v_auditoria).
+// y se dolariza con una cotización única para todo el BOM: la del día de la última modificación
+// de importe (según v_auditoria) entre todos sus precios (fecha_cot_ref).
 router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
     const codigo = (req.query.codigo || '').trim();
     if (!codigo) return res.status(400).json({ error: "Falta parámetro codigo" });
@@ -139,6 +140,47 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
                 JOIN public.producto pc            ON pc.id = c.componente_id
                 JOIN public.unidadmedida un        ON un.id = c.cantidad_unidadmedida_id
                 WHERE pc.codigo::text <> ALL (e.ruta)
+            ),
+            con_precio AS (
+                SELECT e.*, p.costo_unitario, p.moneda, p.fecha_ult_modif
+                FROM est e
+                LEFT JOIN LATERAL (
+                    SELECT pr.inicial2_importe::numeric AS costo_unitario,
+                           uf.nombre::text              AS moneda,
+                           -- Fecha real de la última modificación del importe, desde la auditoría
+                           (
+                               SELECT LEFT(au.fecha, 8)::date
+                               FROM public.v_auditoria au
+                               WHERE au.objeto_id = pr.id
+                                 AND au.entidad   = 'Precio'
+                                 AND au.atributo  = 'Precio final - Importe'
+                                 AND au.accion    = 'Modificación'
+                               ORDER BY au.fecha DESC
+                               LIMIT 1
+                           ) AS fecha_ult_modif
+                    FROM public.v_precio pr
+                    LEFT JOIN public.v_unidadfinanciera uf ON pr.valor2_unidadvalorizacion_id = uf.id
+                    WHERE pr.referencia_id = e.hijo_id
+                      AND pr.bo_place_id   = $2
+                      AND pr.activestatus  = 0
+                      AND LEFT(pr.desdefecha, 8)::date <= CURRENT_DATE
+                      AND (pr.hastafecha IS NULL OR LEFT(pr.hastafecha, 8)::date >= CURRENT_DATE)
+                    ORDER BY LEFT(pr.desdefecha, 8)::date DESC NULLS LAST
+                    LIMIT 1
+                ) p ON $4
+            ),
+            -- Referencia única de cotización: la última actualización de costos de todo el BOM
+            ref AS (
+                SELECT MAX(fecha_ult_modif) AS fecha_ref FROM con_precio
+            ),
+            -- Cotización (pesos por dólar) vigente a esa fecha
+            fx AS (
+                SELECT ROUND(ic.relacionconversion::numeric, 2) AS cotizacion
+                FROM public.v_itemconversionfinanciera ic, ref
+                WHERE ic.bo_place_id = $3
+                  AND LEFT(ic.fecha, 8)::date <= ref.fecha_ref
+                ORDER BY ic.fecha DESC
+                LIMIT 1
             )
             SELECT
                 e.nivel,
@@ -148,54 +190,24 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
                 e.cants[e.nivel]                                         AS cantidad,
                 e.ums[e.nivel]                                           AS unidadmedida,
                 e.qty_acum,
-                p.costo_unitario,
-                ROUND((p.costo_unitario * e.cants[e.nivel])::numeric, 4) AS costo_nivel,
-                ROUND((p.costo_unitario * e.qty_acum)::numeric, 4)       AS costo_acumulado,
-                p.moneda,
-                to_char(p.fecha_ult_modif, 'YYYY-MM-DD')                 AS fecha_precio,
+                e.costo_unitario,
+                ROUND((e.costo_unitario * e.cants[e.nivel])::numeric, 4) AS costo_nivel,
+                ROUND((e.costo_unitario * e.qty_acum)::numeric, 4)       AS costo_acumulado,
+                e.moneda,
+                to_char(e.fecha_ult_modif, 'YYYY-MM-DD')                 AS fecha_precio,
+                to_char(ref.fecha_ref, 'YYYY-MM-DD')                     AS fecha_cot_ref,
                 fx.cotizacion                                            AS cotizacion_usd,
-                ROUND((p.costo_unitario / d.divisor_usd)::numeric, 4)                  AS costo_unitario_usd,
-                ROUND((p.costo_unitario * e.cants[e.nivel] / d.divisor_usd)::numeric, 4) AS costo_nivel_usd,
-                ROUND((p.costo_unitario * e.qty_acum / d.divisor_usd)::numeric, 4)       AS costo_acumulado_usd
-            FROM est e
-            LEFT JOIN LATERAL (
-                SELECT pr.inicial2_importe::numeric AS costo_unitario,
-                       uf.nombre::text              AS moneda,
-                       -- Fecha real de la última modificación del importe, desde la auditoría
-                       (
-                           SELECT LEFT(au.fecha, 8)::date
-                           FROM public.v_auditoria au
-                           WHERE au.objeto_id = pr.id
-                             AND au.entidad   = 'Precio'
-                             AND au.atributo  = 'Precio final - Importe'
-                             AND au.accion    = 'Modificación'
-                           ORDER BY au.fecha DESC
-                           LIMIT 1
-                       ) AS fecha_ult_modif
-                FROM public.v_precio pr
-                LEFT JOIN public.v_unidadfinanciera uf ON pr.valor2_unidadvalorizacion_id = uf.id
-                WHERE pr.referencia_id = e.hijo_id
-                  AND pr.bo_place_id   = $2
-                  AND pr.activestatus  = 0
-                  AND LEFT(pr.desdefecha, 8)::date <= CURRENT_DATE
-                  AND (pr.hastafecha IS NULL OR LEFT(pr.hastafecha, 8)::date >= CURRENT_DATE)
-                ORDER BY LEFT(pr.desdefecha, 8)::date DESC NULLS LAST
-                LIMIT 1
-            ) p ON $4
-            -- Cotización (pesos por dólar) del día en que se actualizó el precio
-            LEFT JOIN LATERAL (
-                SELECT ROUND(ic.relacionconversion::numeric, 2) AS cotizacion
-                FROM public.v_itemconversionfinanciera ic
-                WHERE ic.bo_place_id = $3
-                  AND LEFT(ic.fecha, 8)::date <= p.fecha_ult_modif
-                ORDER BY ic.fecha DESC
-                LIMIT 1
-            ) fx ON (p.fecha_ult_modif IS NOT NULL)
+                ROUND((e.costo_unitario / d.divisor_usd)::numeric, 4)                  AS costo_unitario_usd,
+                ROUND((e.costo_unitario * e.cants[e.nivel] / d.divisor_usd)::numeric, 4) AS costo_nivel_usd,
+                ROUND((e.costo_unitario * e.qty_acum / d.divisor_usd)::numeric, 4)       AS costo_acumulado_usd
+            FROM con_precio e
+            CROSS JOIN ref
+            LEFT JOIN fx ON true
             -- Dolarización: precio en Pesos ÷ cotización; un precio en otra moneda ya está en USD
             LEFT JOIN LATERAL (
                 SELECT CASE
-                         WHEN p.moneda = 'Pesos' AND fx.cotizacion > 0 THEN fx.cotizacion
-                         WHEN p.moneda <> 'Pesos' THEN 1
+                         WHEN e.moneda = 'Pesos' AND fx.cotizacion > 0 THEN fx.cotizacion
+                         WHEN e.moneda <> 'Pesos' THEN 1
                        END AS divisor_usd
             ) d ON true
             ORDER BY e.ruta
@@ -218,6 +230,7 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
             costo_acumulado: num(row.costo_acumulado),
             moneda:          verCostos ? row.moneda || null : null,
             fecha_precio:        verCostos ? row.fecha_precio || null : null,
+            fecha_cot_ref:       verCostos ? row.fecha_cot_ref || null : null,
             cotizacion_usd:      num(row.cotizacion_usd),
             costo_unitario_usd:  num(row.costo_unitario_usd),
             costo_nivel_usd:     num(row.costo_nivel_usd),
