@@ -1,93 +1,99 @@
+const express = require("express");
 const fs = require("fs");
 const path = require('path');
-const pool = require("./db");
 
-module.exports = function(app) {
+const router = express.Router();
 
-app.get("/menu-button", async(req, res) => {
-    try {
-        const allDatas = await pool.query("select id, name, link, img_icon, button_color from web.intranet_menu");
-        res.json(allDatas.rows)
-    } catch (err) {
-        console.log(err.message)
-    }
-})
+/* EXPLORADOR DE ARCHIVOS */
 
-app.get("/getdir", async(req, res) => {
-    
-    
+router.get("/getdir", async(req, res) => {
+
+
     function getDirectoryContents(dirPath) {
         try{
             const items = fs.readdirSync(dirPath);
-    
+
             const result = {
                 name: path.basename(dirPath),
                 path: dirPath,
+                type: 'folder',
                 items: [],
             };
-            
+
             items.forEach(item => {
                 const itemPath = path.join(dirPath, item);
                 const stats = fs.statSync(itemPath);
-            
+
                 if (stats.isDirectory()) {
                     const subdirectoryContents = getDirectoryContents(itemPath);
                     result.items.push(subdirectoryContents);
                 } else {
-                    result.items.push(item);
+                    result.items.push(
+                        {
+                            name: item,
+                            path: itemPath,
+                            type: 'file',
+                        }
+                    );
                 }
             });
-            
+
             return result;
         } catch (err) {
             console.log(err.message)
         }
-      
+
     }
-    
-    const targetDirectory = req.query.dir; 
+
+    const targetDirectory = req.query.dir;
     const directoryContents = getDirectoryContents(targetDirectory);
-    
+
     res.json(directoryContents)
 })
 
-app.get("/searchdir", async(req, res) => {
-    
-    
+router.get("/searchdir", async(req, res) => {
+
+    const result = {
+        name: path.basename(req.query.dir),
+        type: 'folder',
+        items: [],
+    }
+
     function getDirectoryContents(dirPath, word) {
+
         try{
             const items = fs.readdirSync(dirPath);
-    
-            const result = {
-                name: path.basename(dirPath),
-                path: dirPath,
-                items: [],
-            };
-            
+
             items.forEach(item => {
                 const itemPath = path.join(dirPath, item);
                 const stats = fs.statSync(itemPath);
-            
+
                 if (stats.isDirectory()) {
-                    const subdirectoryContents = getDirectoryContents(itemPath);
-                    result.items.push(subdirectoryContents);
+                    const subdirectoryContents = getDirectoryContents(itemPath, word);
                 } else {
                     if(item.includes(word)){
-                        result.items.push(item)
+                        result.items.push(
+                            {
+                                name: item,
+                                path: itemPath,
+                                type: 'file',
+                            }
+                        );
                     }
                 }
             });
-            
+
             return result;
         } catch (err) {
-            console.log(err.message)
+            console.log(err.message);
         }
-      
+
     }
-    
-    const targetDirectory = req.query.dir; 
-    const directoryContents = getDirectoryContents(targetDirectory);
-    
+
+    const targetDirectory = req.query.dir;
+    const search = req.query.search;
+    const directoryContents = getDirectoryContents(targetDirectory, search);
     res.json(directoryContents)
 })
-}
+
+module.exports = router;
