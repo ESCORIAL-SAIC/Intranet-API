@@ -1,8 +1,10 @@
-# Deploy de la API al servidor Docker de la intranet.
-# Corre en el runner self-hosted instalado en ese servidor (etiqueta "intranet"):
-# construye la imagen ahi mismo, actualiza /opt/docker/intranet/docker-compose.yml
-# desde deploy/ y reinicia solo el contenedor "api". Si el contenedor nuevo no
-# queda healthy, vuelve a levantar la imagen anterior.
+# Build y deploy de la API.
+#
+# build:  en GitHub, construye la imagen y la publica en GHCR
+#         (ghcr.io/escorial-saic/intranet-api:latest y :<sha>).
+# deploy: en el runner self-hosted del servidor (etiqueta "intranet"), actualiza
+#         /opt/docker/intranet/docker-compose.yml desde deploy/, baja la imagen nueva
+#         y reinicia solo el contenedor "api". Si no queda healthy, vuelve a la anterior.
 
 name: Deploy API
 
@@ -11,22 +13,59 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-concurrency:
-  group: deploy-api
-  cancel-in-progress: false
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/escorial-saic/intranet-api
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login a ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build y push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
+    needs: build
     runs-on: [ self-hosted, Linux, intranet ]
+    concurrency:
+      group: deploy-api
+      cancel-in-progress: false
     env:
       STACK_DIR: /opt/docker/intranet
       SERVICE: api
-      IMAGE: intranet-api
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy
 
       - name: Validar servidor
         run: |
@@ -37,20 +76,20 @@ jobs:
           test -d "$STACK_DIR/api-files" || { echo "::error::Falta $STACK_DIR/api-files"; exit 1; }
           docker version --format 'Docker {{.Server.Version}}'
 
-      - name: Build de la imagen
-        run: docker build --pull -t "$IMAGE:candidate" .
-
       - name: Actualizar docker-compose.yml del servidor
         run: install -m 644 deploy/docker-compose.yml "$STACK_DIR/docker-compose.yml"
 
-      - name: Levantar la version nueva
+      - name: Login a ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Bajar y levantar la version nueva
         working-directory: ${{ env.STACK_DIR }}
         run: |
           set -euo pipefail
-          if docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
-            docker tag "$IMAGE:latest" "$IMAGE:previous"
-          fi
-          docker tag "$IMAGE:candidate" "$IMAGE:latest"
+          # Imagen que esta corriendo ahora, para el rollback
+          prev=$(docker inspect -f '{{.Image}}' "$(docker compose ps -q "$SERVICE")" 2>/dev/null || true)
+          echo "PREV_IMAGE=$prev" >> "$GITHUB_ENV"
+          docker compose pull "$SERVICE"
           docker compose up -d --no-deps "$SERVICE"
 
       - name: Esperar healthcheck (rollback si falla)
@@ -69,14 +108,14 @@ jobs:
           done
           echo "::error::$SERVICE no quedo healthy, vuelvo a la version anterior"
           docker compose logs --tail 100 "$SERVICE"
-          if docker image inspect "$IMAGE:previous" >/dev/null 2>&1; then
-            docker tag "$IMAGE:previous" "$IMAGE:latest"
-            docker compose up -d --no-deps "$SERVICE"
+          if [ -n "$PREV_IMAGE" ]; then
+            docker tag "$PREV_IMAGE" "$(docker compose config --images "$SERVICE")"
+            docker compose up -d --no-deps --pull never "$SERVICE"
           fi
           exit 1
 
-      - name: Limpiar imagenes viejas
+      - name: Logout y limpieza
         if: always()
         run: |
-          docker rmi "$IMAGE:candidate" >/dev/null 2>&1 || true
+          docker logout ghcr.io || true
           docker image prune -f

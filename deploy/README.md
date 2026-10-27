@@ -1,27 +1,32 @@
-# Deploy de la intranet (Docker)
+# Deploy de la intranet (Docker + GHCR)
 
 Front y API corren en el servidor Docker como un único stack en `/opt/docker/intranet`:
 
 ```
-navegador ──► :INTRANET_PORT ──► web (nginx)
-                                  ├─ /        build de React (Intranet-FrontEnd)
-                                  └─ /api/*   ──► api:2223 (Intranet-API) ──► Postgres de producción
+navegador ──► :INTRANET_PORT ──► intranet-web (nginx)
+                                  ├─ /              build de React (Intranet-FrontEnd)
+                                  ├─ /organigrama/  CSV del organigrama (carpeta del servidor)
+                                  └─ /api/*         ──► intranet-api:2223 (Intranet-API) ──► Postgres de producción
 ```
 
-Cada push a `main` de **Intranet-API** o **Intranet-FrontEnd** dispara su workflow
-`.github/workflows/deploy.yml`. Un runner self-hosted de GitHub Actions instalado en el
-servidor construye la imagen ahí mismo y reinicia solo ese contenedor. Si el contenedor
-nuevo no queda healthy, vuelve a levantar la imagen anterior (`:previous`).
+Cada push a `main` de **Intranet-API** o **Intranet-FrontEnd** corre su `.github/workflows/deploy.yml`:
+
+1. **build** (en GitHub): construye la imagen y la publica en GHCR
+   (`ghcr.io/escorial-saic/intranet-api` / `intranet-web`, tags `:latest` y `:<sha>`).
+2. **deploy** (runner self-hosted en el servidor): `docker compose pull` + `up -d` solo de ese
+   servicio. Si el contenedor nuevo no queda healthy, vuelve a levantar la imagen anterior.
+
+El servidor no compila nada: solo baja imágenes, igual que el resto de los proyectos en `/opt/docker`.
 
 ## Archivos en el servidor
 
 | Ruta | En git | Qué es |
 |---|---|---|
-| `/opt/docker/intranet/docker-compose.yml` | sí (`deploy/docker-compose.yml`) | Lo copia el deploy de la API. No editarlo en el servidor. |
-| `/opt/docker/intranet/.env` | no | Variables del compose (`deploy/.env.example`). |
-| `/opt/docker/intranet/api.env` | no | El `.env` de la API: `DB_*`, `JWT_SECRET`, `OPENAI_*`, etc. |
-| `/opt/docker/intranet/api-files/` | no | `files/` de la API (la app escribe ahí `empleados.json`, `empleados-cap.json`). |
-| `/opt/docker/intranet/web-overlay/` | no | Archivos que el build del front necesita y no están en git. El deploy del front los copia sobre el código antes de compilar, respetando la ruta. |
+| `docker-compose.yml` | sí (`deploy/docker-compose.yml`) | Lo copia el deploy de la API. No editarlo en el servidor. |
+| `.env` | no | Variables del compose (`deploy/.env.example`). |
+| `api.env` | no | El `.env` de la API: `DB_*`, `JWT_SECRET`, `OPENAI_*`, etc. |
+| `api-files/` | no | `files/` de la API (la app escribe ahí `empleados.json`, `empleados-cap.json`). |
+| `organigrama/` | no | `organigrama.csv` y `organigramaAdm.csv`. Se pueden reemplazar en caliente, sin redeploy. |
 
 ## Instalación (una sola vez)
 
@@ -37,23 +42,17 @@ sudo usermod -aG docker github-runner
 ### 2. Carpeta del stack
 
 ```bash
-sudo mkdir -p /opt/docker/intranet/api-files
+sudo mkdir -p /opt/docker/intranet/api-files /opt/docker/intranet/organigrama
 sudo chown -R github-runner:github-runner /opt/docker/intranet
 # La API corre como el usuario "node" (uid 1000) dentro del contenedor
 sudo chown -R 1000:1000 /opt/docker/intranet/api-files
 ```
 
-- `api.env`: copiar el `.env` de producción de la API. `DB_HOST` tiene que ser alcanzable
-  desde el servidor y el `pg_hba.conf` de Postgres tiene que aceptar su IP.
-  `PORT` no hace falta, lo fija el compose.
-- `api-files/`: copiar el contenido actual de `files/` del servidor viejo.
+- `api.env`: el `.env` de producción de la API. `DB_HOST` tiene que ser alcanzable desde el
+  servidor y el `pg_hba.conf` de Postgres tiene que aceptar su IP. `PORT` no hace falta, lo fija el compose.
+- `api-files/`: el contenido actual de `files/` del servidor viejo.
+- `organigrama/`: `organigrama.csv` y `organigramaAdm.csv`.
 - `.env`: copiar `deploy/.env.example` y ajustar `INTRANET_PORT` si el 80 ya está en uso.
-- `web-overlay/`: el front importa dos CSV ignorados por git (`*.csv`); sin ellos el build falla.
-  Copiar los reales con la misma ruta que tienen en el repo del front:
-  ```
-  web-overlay/src/components/Modules/Organigrama/organigrama.csv
-  web-overlay/src/components/Modules/OrganigramaAdm/organigramaAdm.csv
-  ```
 
 ```bash
 sudo chmod 600 /opt/docker/intranet/api.env /opt/docker/intranet/.env
@@ -79,10 +78,14 @@ sudo ./svc.sh start
 
 El runner tiene que aparecer **Idle** en GitHub con las etiquetas `self-hosted`, `Linux`, `X64`, `intranet`.
 
+El job de deploy se loguea en GHCR con el token del propio workflow, así que el servidor no
+necesita un token guardado. Para correr `docker compose pull` a mano hace falta
+`docker login ghcr.io` con un token con `read:packages`.
+
 ### 4. Primer deploy
 
-1. Mergear a `main` el workflow de **Intranet-API** primero: crea el `docker-compose.yml` y levanta `api`.
-2. Después el de **Intranet-FrontEnd**: levanta `web`.
+1. Mergear a `main` el workflow de **Intranet-API** primero: crea el `docker-compose.yml` y levanta la API.
+2. Después el de **Intranet-FrontEnd**: levanta el front.
 
 También se pueden lanzar a mano desde la pestaña **Actions** de cada repo → *Run workflow*.
 
@@ -95,9 +98,6 @@ docker compose logs -f api        # logs de la API
 docker compose restart api        # reiniciar sin redeployar
 ```
 
-Volver a la versión anterior a mano (por ejemplo, de la API):
-
-```bash
-docker tag intranet-api:previous intranet-api:latest
-docker compose up -d --no-deps api
-```
+Fijar una versión puntual (por ejemplo, volver atrás a un commit conocido): en `.env` poner
+`API_TAG=<sha del commit>` (o `WEB_TAG`) y correr `docker compose pull api && docker compose up -d api`.
+Mientras esté fijada, los deploys automáticos de ese servicio no la cambian; borrar la línea para volver a `latest`.

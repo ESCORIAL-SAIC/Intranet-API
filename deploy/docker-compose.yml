@@ -3,20 +3,28 @@
 # Este archivo vive en el repo Intranet-API y el workflow de deploy de la API
 # lo copia al servidor en cada deploy: no editarlo a mano en el servidor.
 #
-# Las imagenes no se bajan de ningun registry: las construyen en el propio
-# servidor los workflows de cada repo (intranet-api:latest e intranet-web:latest).
+# Las imagenes las publica en GHCR el CI de cada repo (.github/workflows/deploy.yml)
+# y el mismo workflow las baja aca. Para fijar una version puntual, poner en .env
+# API_TAG / WEB_TAG con el sha del commit (por defecto usa :latest).
 #
 # Archivos en /opt/docker/intranet que NO estan en git:
 #   .env       variables de este compose (ver deploy/.env.example)
 #   api.env    variables de la API: DB, JWT, OpenAI (el .env de la API)
 #   api-files/ datos que la API escribe en runtime (files/ del repo)
+#   organigrama/ organigrama.csv y organigramaAdm.csv que muestra el front
 
 name: intranet
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   api:
-    image: intranet-api:latest
-    pull_policy: never
+    image: ghcr.io/escorial-saic/intranet-api:${API_TAG:-latest}
+    container_name: intranet-api
     restart: unless-stopped
     env_file:
       - ./api.env
@@ -37,18 +45,23 @@ services:
       timeout: 5s
       retries: 6
       start_period: 15s
+    logging: *logging
 
   web:
-    image: intranet-web:latest
-    pull_policy: never
+    image: ghcr.io/escorial-saic/intranet-web:${WEB_TAG:-latest}
+    container_name: intranet-web
     restart: unless-stopped
     environment:
       TZ: America/Argentina/Buenos_Aires
     ports:
       - "${INTRANET_PORT:-80}:80"
+    volumes:
+      # CSV del organigrama (fuera de git): se sirven en /organigrama/
+      - ./organigrama:/usr/share/nginx/organigrama:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
       interval: 10s
       timeout: 5s
       retries: 6
       start_period: 5s
+    logging: *logging
