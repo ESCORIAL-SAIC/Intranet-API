@@ -4,6 +4,7 @@ const { pool } = require("../../config/db");
 const requireAuth = require("../../middleware/requireAuth");
 const { perteneceGrupo } = require("../../shared/grupos");
 const { obtenerGerenciaDelUsuario, obtenerReportesDirectos } = require("../../shared/organigrama");
+const { TIPOS_FORMULARIO, obtenerCicloVigente, obtenerEstadoFormulariosEquipo } = require("../../shared/talento");
 
 const router = express.Router();
 
@@ -16,11 +17,6 @@ const router = express.Router();
    en los maquetados de referencia). */
 
 const GRUPO_ADMIN = "'Direccion','administradores','rrhh'";
-
-const TIPOS_FORMULARIO = {
-    'riesgo-impacto': { dbTipo: 'riesgo_impacto', tabla: 'formulario_riesgo_impacto' },
-    'guia-potencial': { dbTipo: 'guia_potencial', tabla: 'formulario_guia_potencial' },
-};
 
 async function esAdminRRHH(username) {
     return perteneceGrupo({ username, grupousuario: GRUPO_ADMIN });
@@ -53,14 +49,6 @@ async function obtenerPuestoSnapshot(empleadoId) {
         WHERE emp.id = $1
     `, [empleadoId]);
     return empleadoData.rows[0] ? empleadoData.rows[0].puesto : null;
-}
-
-async function obtenerCicloVigente(dbTipo) {
-    const result = await pool.query(
-        "SELECT * FROM web.ciclo_formulario_rrhh WHERE tipo = $1 AND CURRENT_DATE BETWEEN fecha_desde AND fecha_hasta ORDER BY fecha_creacion DESC LIMIT 1",
-        [dbTipo]
-    );
-    return result.rows[0] || null;
 }
 
 async function cicloVigentePorId(cicloId) {
@@ -217,30 +205,8 @@ router.get("/rrhh-formularios/pendientes/:tipo", requireAuth, async(req, res) =>
         const reportes = await obtenerReportesDirectos(username);
         const ciclo = await obtenerCicloVigente(info.dbTipo);
 
-        if (!ciclo || reportes.length === 0) {
-            return res.json({ ciclo: ciclo || null, items: [] });
-        }
-
-        const empleadoIds = reportes.map(r => r.id);
-        const placeholders = empleadoIds.map((_, i) => `$${i + 2}`).join(',');
-        const existentes = await pool.query(
-            `SELECT id, empleado_id, estado FROM web.${info.tabla} WHERE ciclo_id = $1 AND empleado_id IN (${placeholders})`,
-            [ciclo.id, ...empleadoIds]
-        );
-        const porEmpleado = new Map(existentes.rows.map(r => [r.empleado_id, r]));
-
-        const items = reportes.map(r => {
-            const existente = porEmpleado.get(r.id);
-            return {
-                empleado_id: r.id,
-                empleado_nombre: r.nombre,
-                puesto: r.puesto,
-                registro_id: existente ? existente.id : null,
-                estado: existente ? existente.estado : 'pendiente',
-            };
-        });
-
-        res.json({ ciclo, items });
+        const items = await obtenerEstadoFormulariosEquipo(req.params.tipo, ciclo, reportes);
+        res.json({ ciclo: ciclo || null, items });
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Error obteniendo pendientes" });

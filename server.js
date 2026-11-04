@@ -30,6 +30,7 @@ app.use(require('./modules/objetivos-gerencias/objetivos-gerencias.routes'));
 app.use(require('./modules/objetivos-anuales/objetivos-anuales.routes'));
 app.use(require('./modules/rrhh-formularios/rrhh-formularios.routes'));
 app.use(require('./modules/nuevebox/nuevebox.routes'));
+app.use(require('./modules/talent-review/talent-review.routes'));
 app.use(require('./modules/genoma/genoma.routes'));
 app.use(require('./modules/cvs/cvs.routes'));
 app.use(require('./modules/chat-agentes/chat-agentes.routes'));

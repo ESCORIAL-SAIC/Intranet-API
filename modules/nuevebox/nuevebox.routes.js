@@ -3,6 +3,7 @@ const { pool } = require("../../config/db");
 const requireAuth = require("../../middleware/requireAuth");
 const { getOpenAIClient } = require("../../config/openai");
 const { obtenerGerenciaDelUsuario, obtenerReportesDirectos } = require("../../shared/organigrama");
+const { ANTIGUEDAD_MINIMA_MESES_9BOX, tieneAntiguedadInsuficiente, evaluarHabilitacion9box } = require("../../shared/talento");
 
 const router = express.Router();
 
@@ -268,15 +269,6 @@ function clamp(valor, min, max, porDefecto) {
     return Math.min(max, Math.max(min, n));
 }
 
-// No se evalúa (ni con IA ni manualmente) a colaboradores con esta antigüedad o menos:
-// no hay historial suficiente de desempeño/potencial para ubicarlos en una caja.
-const ANTIGUEDAD_MINIMA_MESES_9BOX = 6;
-
-function tieneAntiguedadInsuficiente(tenureMonths) {
-    const meses = Number(tenureMonths);
-    return Number.isFinite(meses) && meses <= ANTIGUEDAD_MINIMA_MESES_9BOX;
-}
-
 // Rangos de referencia con respaldo de benchmark (ver info-prompts/distribucion-9box-referencia.html).
 // Sirven solo para generar una alerta informativa al calibrar un registro, nunca para bloquear la carga.
 const BENCHMARK_BLOQUES_9BOX = [
@@ -405,6 +397,13 @@ router.post("/nuevebox", requireAuth, async(req, res) => {
         const infoUsuario = await obtenerGerenciaDelUsuario(username);
         if (!infoUsuario) {
             return res.status(403).json({ error: "No se puede determinar la gerencia/sector del usuario" });
+        }
+
+        // Paso previo del Talent Review: sin Guía de Potencial + Riesgo e Impacto finalizados
+        // para todo el equipo no se puede armar la matriz.
+        const habilitacion = await evaluarHabilitacion9box(await obtenerReportesDirectos(username));
+        if (!habilitacion.habilitado) {
+            return res.status(409).json({ error: habilitacion.motivo, habilitacion });
         }
 
         const registroId = require('crypto').randomUUID();

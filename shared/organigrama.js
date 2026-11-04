@@ -37,6 +37,7 @@ async function obtenerReportesDirectos(username) {
             SELECT
                 e.id,
                 e.descripcion as nombre,
+                ude.usuario_sistema,
                 e.sector_id,
                 s.nombre as sector_nombre,
                 e.gerencia_id,
