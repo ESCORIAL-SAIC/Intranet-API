@@ -32,6 +32,15 @@ function puedeVerCostos(req) {
     return perteneceGrupo({ username: req.user.username, grupousuario: GRUPOS_COSTOS });
 }
 
+// Parámetro de query de texto: '' si no vino, null si es inválido (no string, ej. ?codigo[]=x, o muy largo)
+const PARAM_MAX_LARGO = 100;
+function paramTexto(req, nombre) {
+    const v = req.query[nombre];
+    if (v === undefined) return '';
+    if (typeof v !== 'string' || v.length > PARAM_MAX_LARGO) return null;
+    return v.trim();
+}
+
 // GET /estructura-productos/permisos — qué puede ver el usuario en la solapa
 router.get("/estructura-productos/permisos", requireAuth, async(req, res) => {
     try {
@@ -43,15 +52,22 @@ router.get("/estructura-productos/permisos", requireAuth, async(req, res) => {
 });
 
 // GET /estructura-productos/productos?q=texto — autocompletar productos por código o descripción.
-// Devuelve los PT raíz (sin padres) y cualquier componente que tenga estructura propia,
-// con tipo 'PT' o 'COMP'. Los PT primero.
+// Devuelve los PT raíz (sin padres) y cualquier componente que tenga estructura propia, y con
+// búsqueda activa también los componentes hoja (usados en algún BOM pero sin estructura propia).
+// tipo 'PT' o 'COMP'; hoja = true si no tiene subcomponentes (la solapa no pide su estructura).
+// Los PT primero.
 router.get("/estructura-productos/productos", requireAuth, async(req, res) => {
-    const q = (req.query.q || '').trim();
+    const q = paramTexto(req, 'q');
+    if (q === null) return res.status(400).json({ error: "Parámetro q inválido" });
     try {
         const result = await pool.query(`
             SELECT p.codigo::text AS codigo,
                    p.descripcion::text AS descripcion,
-                   CASE WHEN ud.tipoproduccion = 'PT' THEN 'PT' ELSE 'COMP' END AS tipo
+                   CASE WHEN ud.tipoproduccion = 'PT' THEN 'PT' ELSE 'COMP' END AS tipo,
+                   NOT EXISTS (
+                     SELECT 1 FROM public.defprocesoproductivo dp
+                     WHERE dp.producto_id = p.id AND dp.activestatus = 0
+                   ) AS hoja
             FROM public.producto p
             LEFT JOIN public.segmento seg ON seg.id = p.segmento_id
             LEFT JOIN public.ud_producto ud ON ud.id = p.boextension_id
@@ -71,6 +87,18 @@ router.get("/estructura-productos/productos", requireAuth, async(req, res) => {
                   SELECT 1 FROM public.defprocesoproductivo dp
                   WHERE dp.producto_id = p.id AND dp.activestatus = 0
                 )
+                OR
+                -- Solo con búsqueda: componente hoja, usado en algún BOM pero sin subcomponentes propios
+                ($2 <> ''
+                 AND EXISTS (
+                   SELECT 1 FROM public.itemcomponente ic2
+                   JOIN public.defprocesoproductivo dp2 ON dp2.componentes_id = ic2.bo_place_id
+                   WHERE ic2.componente_id = p.id AND dp2.activestatus = 0
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM public.defprocesoproductivo dp3
+                   WHERE dp3.producto_id = p.id AND dp3.activestatus = 0
+                 ))
               )
               AND ($2 = '' OR LOWER(p.codigo::text) LIKE LOWER('%' || $2 || '%')
                            OR LOWER(p.descripcion::text) LIKE LOWER('%' || $2 || '%'))
@@ -90,8 +118,8 @@ router.get("/estructura-productos/productos", requireAuth, async(req, res) => {
 // y se dolariza con una cotización única para todo el BOM: la del día de la última modificación
 // de importe (según v_auditoria) entre todos sus precios (fecha_cot_ref).
 router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
-    const codigo = (req.query.codigo || '').trim();
-    if (!codigo) return res.status(400).json({ error: "Falta parámetro codigo" });
+    const codigo = paramTexto(req, 'codigo');
+    if (!codigo) return res.status(400).json({ error: codigo === null ? "Parámetro codigo inválido" : "Falta parámetro codigo" });
     try {
         // Sin permiso de costos no se buscan precios ($4 = false) y los campos de costo van en null
         const verCostos = await puedeVerCostos(req);
@@ -245,8 +273,8 @@ router.get("/estructura-productos/estructura", requireAuth, async(req, res) => {
 // GET /estructura-productos/donde-se-usa?codigo=CODIGO
 // Productos terminados (raíces del BOM) que usan el componente, directa o indirectamente.
 router.get("/estructura-productos/donde-se-usa", requireAuth, async(req, res) => {
-    const codigo = (req.query.codigo || '').trim();
-    if (!codigo) return res.status(400).json({ error: "Falta parámetro codigo" });
+    const codigo = paramTexto(req, 'codigo');
+    if (!codigo) return res.status(400).json({ error: codigo === null ? "Parámetro codigo inválido" : "Falta parámetro codigo" });
     try {
         const result = await pool.query(`
             WITH RECURSIVE
