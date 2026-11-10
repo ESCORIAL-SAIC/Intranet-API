@@ -33,8 +33,12 @@ services:
       NODE_ENV: production
       # node-cron usa la hora local del contenedor
       TZ: America/Argentina/Buenos_Aires
+      # CSV con sueldos que filtra GET /organigrama (solapa OrganigramaGer)
+      ORGANIGRAMA_CSV: /app/organigrama/organigramaAdm.csv
     volumes:
       - ./api-files:/app/files
+      # Misma carpeta de CSV del organigrama que sirve "web"
+      - ./organigrama:/app/organigrama:ro
     # Sin puertos publicados: se accede a traves de "web" en /api/.
     # Si algo externo necesita pegarle directo, descomentar:
     # ports:
