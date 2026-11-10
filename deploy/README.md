@@ -26,7 +26,7 @@ El servidor no compila nada: solo baja imágenes, igual que el resto de los proy
 | `.env` | no | Variables del compose (`deploy/.env.example`). |
 | `api.env` | no | El `.env` de la API: `DB_*`, `JWT_SECRET`, `OPENAI_*`, etc. |
 | `api-files/` | no | `files/` de la API (la app escribe ahí `empleados.json`, `empleados-cap.json`). |
-| `organigrama/` | no | `organigrama.csv` y `organigramaAdm.csv`. Se pueden reemplazar en caliente, sin redeploy. |
+| `organigrama/` | no | `organigrama.csv` y `organigramaAdm.csv`. Se pueden reemplazar en caliente, sin redeploy. La API también lee `organigramaAdm.csv` (montado en `/app/organigrama`) para `GET /organigrama`. |
 
 ## Instalación (una sola vez)
 

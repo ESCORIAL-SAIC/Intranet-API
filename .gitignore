@@ -162,3 +162,5 @@ dist
 
 # Ignore all sql files in the project
 *.sql
+# CSV del organigrama con sueldos: nunca a git
+data/organigramaAdm.csv
