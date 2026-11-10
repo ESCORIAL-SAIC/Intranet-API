@@ -4,6 +4,7 @@ const { pool } = require("../../config/db");
 const requireAuth = require("../../middleware/requireAuth");
 const { perteneceGrupo } = require("../../shared/grupos");
 const { obtenerGerenciaDelUsuario } = require("../../shared/organigrama");
+const teams = require("./teams");
 
 const router = express.Router();
 
@@ -117,7 +118,9 @@ async function obtenerItems(roadmapId, client = pool) {
                 TO_CHAR(fecha, 'YYYY-MM-DD') AS fecha, TO_CHAR(horario, 'HH24:MI') AS horario,
                 duracion_min, ubicacion, facilitador, material_url,
                 evaluacion_tipo, evaluacion_completada, evaluacion_fecha, evaluacion_marcada_por,
-                observaciones, completada, fecha_completada, completada_por
+                observaciones, completada, fecha_completada, completada_por,
+                sala_email, sala_nombre, teams_event_id, teams_join_url, teams_sala_estado,
+                teams_sync, teams_error, teams_sincronizado
          FROM web.induccion_roadmap_item WHERE roadmap_id = $1 ORDER BY orden ASC`,
         [roadmapId]
     );
@@ -191,15 +194,18 @@ function validarItems(items, estado) {
 
 // Inserta o actualiza los items enviados (en el orden recibido) y elimina los que ya no
 // están. Los items existentes conservan su estado de completada; la evaluación vuelve a
-// pendiente si RRHH le cambia el tipo.
+// pendiente si RRHH le cambia el tipo. Devuelve los ids de evento de Teams de las inducciones
+// eliminadas, para cancelarlos una vez confirmada la transacción.
 async function guardarItems(client, roadmapId, items) {
     const existentes = await obtenerItems(roadmapId, client);
     const idsExistentes = new Set(existentes.map(i => i.id));
     const idsRecibidos = new Set(items.filter(i => i.id).map(i => i.id));
+    const eventosEliminados = [];
 
     for (const existente of existentes) {
         if (!idsRecibidos.has(existente.id)) {
             await client.query("DELETE FROM web.induccion_roadmap_item WHERE id = $1", [existente.id]);
+            if (existente.teams_event_id) eventosEliminados.push(existente.teams_event_id);
         }
     }
 
@@ -216,27 +222,76 @@ async function guardarItems(client, roadmapId, items) {
             item.material_url || null,
             item.evaluacion_tipo || null,
             item.observaciones || null,
+            item.sala_email || null,
+            item.sala_email ? (item.sala_nombre || null) : null,
         ];
         if (item.id && idsExistentes.has(item.id)) {
             await client.query(`
                 UPDATE web.induccion_roadmap_item
                 SET orden = $1, nombre = $2, fecha = $3, horario = $4, duracion_min = $5, ubicacion = $6,
-                    facilitador = $7, material_url = $8, observaciones = $10,
+                    facilitador = $7, material_url = $8, observaciones = $10, sala_email = $11, sala_nombre = $12,
                     evaluacion_completada  = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_completada ELSE false END,
                     evaluacion_fecha       = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_fecha END,
                     evaluacion_marcada_por = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_marcada_por END,
                     evaluacion_tipo = $9::varchar
-                WHERE id = $11 AND roadmap_id = $12
+                WHERE id = $13 AND roadmap_id = $14
             `, [...valores, item.id, roadmapId]);
         } else {
             await client.query(`
                 INSERT INTO web.induccion_roadmap_item
                     (id, roadmap_id, catalogo_id, orden, nombre, fecha, horario, duracion_min, ubicacion,
-                     facilitador, material_url, evaluacion_tipo, observaciones)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                     facilitador, material_url, evaluacion_tipo, observaciones, sala_email, sala_nombre)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             `, [crypto.randomUUID(), roadmapId, item.catalogo_id || null, ...valores]);
         }
     }
+    return eventosEliminados;
+}
+
+// Crea/actualiza las reuniones de Teams de un roadmap publicado y cancela las de inducciones
+// eliminadas. Nunca hace fallar el guardado: los errores de Graph quedan en teams_error de cada
+// inducción (se reintenta en el próximo guardado). Sin configuración de Teams no hace nada.
+async function sincronizarTeams(roadmapId, eventosACancelar = []) {
+    if (!teams.teamsHabilitado()) return;
+
+    for (const eventId of eventosACancelar) {
+        try {
+            await teams.cancelarEvento(eventId);
+        } catch (err) {
+            console.log('Teams: no se pudo cancelar el evento', eventId, err.message);
+        }
+    }
+
+    const roadmapData = await pool.query("SELECT * FROM web.induccion_roadmap WHERE id = $1", [roadmapId]);
+    const roadmap = roadmapData.rows[0];
+    if (!roadmap || roadmap.estado === 'borrador') return;
+
+    for (const item of await obtenerItems(roadmapId)) {
+        if (!item.fecha || !item.horario) continue;
+        try {
+            const cambios = await teams.sincronizarItem(roadmap, item);
+            if (!cambios) continue;
+            await pool.query(`
+                UPDATE web.induccion_roadmap_item
+                SET teams_event_id = $1, teams_join_url = $2, teams_sala_estado = $3, teams_sync = $4,
+                    teams_error = NULL, teams_sincronizado = NOW()
+                WHERE id = $5
+            `, [cambios.teams_event_id, cambios.teams_join_url, cambios.teams_sala_estado, JSON.stringify(cambios.teams_sync), item.id]);
+        } catch (err) {
+            console.log('Teams: error sincronizando la inducción', item.id, err.message);
+            await pool.query("UPDATE web.induccion_roadmap_item SET teams_error = $1, teams_sincronizado = NOW() WHERE id = $2",
+                [String(err.message).substring(0, 500), item.id]);
+        }
+    }
+}
+
+// El colaborador no ve los datos internos de las reuniones de RRHH.
+function paraColaborador(roadmap) {
+    if (!roadmap) return roadmap;
+    return {
+        ...roadmap,
+        items: roadmap.items.map(({ teams_event_id, teams_join_url, teams_sala_estado, teams_sync, teams_error, teams_sincronizado, ...item }) => item),
+    };
 }
 
 function datosCabecera(body) {
@@ -371,6 +426,51 @@ router.get("/induccion/empleados/:id/datos", requireAuth, async(req, res) => {
     }
 });
 
+/* ================================ TEAMS Y SALAS (RRHH) ================================ */
+
+// Indica al frontend si la integración con Teams está configurada (si no, se oculta la sala).
+router.get("/induccion/teams/config", requireAuth, async(req, res) => {
+    try {
+        if (!(await requireRRHH(req, res))) return;
+        res.json({ habilitado: teams.teamsHabilitado() });
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error obteniendo la configuración de Teams" });
+    }
+});
+
+// Salas reservables con su disponibilidad en el horario de la inducción. item_id (opcional):
+// la reserva que ya tiene esa misma inducción no cuenta como ocupación.
+router.get("/induccion/salas/disponibilidad", requireAuth, async(req, res) => {
+    try {
+        if (!(await requireRRHH(req, res))) return;
+        if (!teams.teamsHabilitado()) {
+            return res.json({ habilitado: false, salas: [] });
+        }
+        const salas = await teams.listarSalas();
+        const { fecha, horario, duracion, item_id } = req.query;
+        if (!fecha || !horario) {
+            return res.json({ habilitado: true, salas: salas.map(s => ({ ...s, disponible: null })) });
+        }
+
+        const slot = teams.calcularSlot(fecha, horario, duracion);
+        let ignorar = null;
+        if (item_id) {
+            const itemData = await pool.query("SELECT teams_sync FROM web.induccion_roadmap_item WHERE id = $1", [item_id]);
+            const sync = itemData.rows[0] && itemData.rows[0].teams_sync;
+            if (sync && sync.sala_reservada) ignorar = { email: sync.sala_email, inicio: sync.inicio, fin: sync.fin };
+        }
+        const disponibilidad = await teams.disponibilidadSalas(salas.map(s => s.email), slot, ignorar);
+        res.json({
+            habilitado: true,
+            salas: salas.map(s => ({ ...s, disponible: disponibilidad[s.email] === undefined ? null : disponibilidad[s.email] })),
+        });
+    } catch (err) {
+        console.log(err);
+        res.status(502).json({ error: "No se pudo consultar la disponibilidad de salas en Microsoft 365" });
+    }
+});
+
 /* ==================================== ROADMAPS (RRHH) ==================================== */
 
 router.get("/induccion/roadmaps", requireAuth, async(req, res) => {
@@ -464,6 +564,7 @@ router.post("/induccion/roadmaps", requireAuth, async(req, res) => {
             ...datosCabecera(req.body), estado, estado === 'publicado', req.user.username]);
         await guardarItems(client, roadmapId, items);
         await client.query('COMMIT');
+        await sincronizarTeams(roadmapId);
 
         res.status(201).json({ roadmap: await obtenerRoadmapCompleto(roadmapId) });
     } catch (err) {
@@ -507,9 +608,10 @@ router.put("/induccion/roadmaps/:id", requireAuth, async(req, res) => {
                 fecha_actualizacion = NOW()
             WHERE id = $9
         `, [...datosCabecera(req.body), publicar, actual.id]);
-        await guardarItems(client, actual.id, items);
+        const eventosEliminados = await guardarItems(client, actual.id, items);
         await actualizarEstadoFinal(actual.id, client);
         await client.query('COMMIT');
+        await sincronizarTeams(actual.id, eventosEliminados);
 
         res.json({ roadmap: await obtenerRoadmapCompleto(actual.id) });
     } catch (err) {
@@ -524,14 +626,38 @@ router.put("/induccion/roadmaps/:id", requireAuth, async(req, res) => {
 router.delete("/induccion/roadmaps/:id", requireAuth, async(req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
+        const eventos = await pool.query(
+            "SELECT teams_event_id FROM web.induccion_roadmap_item WHERE roadmap_id = $1 AND teams_event_id IS NOT NULL",
+            [req.params.id]
+        );
         const result = await pool.query("DELETE FROM web.induccion_roadmap WHERE id = $1 RETURNING id", [req.params.id]);
         if (result.rows.length === 0) {
             return res.status(404).json({ error: "Roadmap no encontrado" });
         }
+        await sincronizarTeams(req.params.id, eventos.rows.map(e => e.teams_event_id));
         res.json({ ok: true });
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Error eliminando el roadmap" });
+    }
+});
+
+// Reintenta crear/actualizar las reuniones de Teams (ej. después de un error de Graph).
+router.post("/induccion/roadmaps/:id/teams/sincronizar", requireAuth, async(req, res) => {
+    try {
+        if (!(await requireRRHH(req, res))) return;
+        if (!teams.teamsHabilitado()) {
+            return res.status(400).json({ error: "La integración con Teams no está configurada" });
+        }
+        const roadmap = await obtenerRoadmapCompleto(req.params.id);
+        if (!roadmap) {
+            return res.status(404).json({ error: "Roadmap no encontrado" });
+        }
+        await sincronizarTeams(roadmap.id);
+        res.json({ roadmap: await obtenerRoadmapCompleto(roadmap.id) });
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error sincronizando las reuniones de Teams" });
     }
 });
 
@@ -639,7 +765,7 @@ async function obtenerRoadmapDelUsuario(username) {
         [usuario.empleado_id]
     );
     if (result.rows.length === 0) return null;
-    return obtenerRoadmapCompleto(result.rows[0].id);
+    return paraColaborador(await obtenerRoadmapCompleto(result.rows[0].id));
 }
 
 router.get("/induccion/mi-induccion", requireAuth, async(req, res) => {
@@ -676,7 +802,7 @@ router.post("/induccion/mi-induccion/encuesta", requireAuth, async(req, res) => 
         `, [JSON.stringify({ puntaje, comentarios: req.body.comentarios || '' }), roadmap.id]);
         await actualizarEstadoFinal(roadmap.id);
 
-        res.json({ roadmap: await obtenerRoadmapCompleto(roadmap.id) });
+        res.json({ roadmap: paraColaborador(await obtenerRoadmapCompleto(roadmap.id)) });
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Error guardando la encuesta" });
@@ -695,7 +821,7 @@ router.post("/induccion/mi-induccion/encuesta-1mes", requireAuth, async(req, res
         }
 
         await marcarEncuesta1Mes(roadmap.id, true, req.user.username);
-        res.json({ roadmap: await obtenerRoadmapCompleto(roadmap.id) });
+        res.json({ roadmap: paraColaborador(await obtenerRoadmapCompleto(roadmap.id)) });
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Error guardando la encuesta de 1.er mes" });
