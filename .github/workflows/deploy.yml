@@ -1,16 +1,20 @@
 # Build y deploy de la API.
 #
 # build:  en GitHub, construye la imagen y la publica en GHCR
-#         (ghcr.io/escorial-saic/intranet-api:latest y :<sha>).
+#         (ghcr.io/escorial-saic/intranet-api:<latest|dev> y :<sha>).
 # deploy: en el runner self-hosted del servidor (etiqueta "intranet"), actualiza
-#         /opt/docker/intranet/docker-compose.yml desde deploy/, baja la imagen nueva
+#         <stack>/docker-compose.yml desde deploy/, baja la imagen nueva
 #         y reinicia solo el contenedor "api". Si no queda healthy, vuelve a la anterior.
+#
+# Cada rama despliega en su propio stack del servidor:
+#   main -> produccion  /opt/docker/intranet      imagen :latest
+#   dev  -> prueba      /opt/docker/intranet-dev  imagen :dev
 
 name: Deploy API
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
   workflow_dispatch:
 
 permissions:
@@ -19,9 +23,13 @@ permissions:
 
 env:
   IMAGE: ghcr.io/escorial-saic/intranet-api
+  TAG: ${{ github.ref_name == 'main' && 'latest' || 'dev' }}
+  STACK_DIR: ${{ github.ref_name == 'main' && '/opt/docker/intranet' || '/opt/docker/intranet-dev' }}
 
 jobs:
   build:
+    # workflow_dispatch solo desde main o dev
+    if: github.ref_name == 'main' || github.ref_name == 'dev'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +50,7 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.TAG }}
             ${{ env.IMAGE }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -54,10 +62,9 @@ jobs:
     needs: build
     runs-on: [ self-hosted, Linux, intranet ]
     concurrency:
-      group: deploy-api
+      group: deploy-api-${{ github.ref_name }}
       cancel-in-progress: false
     env:
-      STACK_DIR: /opt/docker/intranet
       SERVICE: api
     defaults:
       run:

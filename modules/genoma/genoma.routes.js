@@ -180,6 +180,10 @@ async function procesarGenomaPdfsPendientesERP() {
     }
 }
 
-cron.schedule('0 * * * *', procesarGenomaPdfsPendientesERP);
+// El entorno de prueba comparte la base con produccion: ahi se apaga con
+// DISABLE_CRON=true para no procesar dos veces los mismos informes
+if (process.env.DISABLE_CRON !== 'true') {
+    cron.schedule('0 * * * *', procesarGenomaPdfsPendientesERP);
+}
 
 module.exports = router;

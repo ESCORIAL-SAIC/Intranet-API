@@ -1,4 +1,8 @@
-# Stack de produccion de la intranet: /opt/docker/intranet/docker-compose.yml
+# Stack de la intranet. El mismo archivo sirve para los dos entornos:
+#   produccion: /opt/docker/intranet      (rama main, imagenes :latest)
+#   prueba:     /opt/docker/intranet-dev  (rama dev,  imagenes :dev)
+# Lo que cambia entre uno y otro lo define el .env de cada carpeta
+# (STACK_NAME, INTRANET_PORT, API_TAG, WEB_TAG; ver deploy/.env.example).
 #
 # Este archivo vive en el repo Intranet-API y el workflow de deploy de la API
 # lo copia al servidor en cada deploy: no editarlo a mano en el servidor.
@@ -7,13 +11,13 @@
 # y el mismo workflow las baja aca. Para fijar una version puntual, poner en .env
 # API_TAG / WEB_TAG con el sha del commit (por defecto usa :latest).
 #
-# Archivos en /opt/docker/intranet que NO estan en git:
+# Archivos en la carpeta del stack que NO estan en git:
 #   .env       variables de este compose (ver deploy/.env.example)
 #   api.env    variables de la API: DB, JWT, OpenAI (el .env de la API)
 #   api-files/ datos que la API escribe en runtime (files/ del repo)
 #   organigrama/ organigrama.csv y organigramaAdm.csv que muestra el front
 
-name: intranet
+name: ${STACK_NAME:-intranet}
 
 x-logging: &logging
   driver: json-file
@@ -24,7 +28,7 @@ x-logging: &logging
 services:
   api:
     image: ghcr.io/escorial-saic/intranet-api:${API_TAG:-latest}
-    container_name: intranet-api
+    container_name: ${STACK_NAME:-intranet}-api
     restart: unless-stopped
     env_file:
       - ./api.env
@@ -53,7 +57,7 @@ services:
 
   web:
     image: ghcr.io/escorial-saic/intranet-web:${WEB_TAG:-latest}
-    container_name: intranet-web
+    container_name: ${STACK_NAME:-intranet}-web
     restart: unless-stopped
     environment:
       TZ: America/Argentina/Buenos_Aires

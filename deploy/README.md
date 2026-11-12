@@ -18,6 +18,23 @@ Cada push a `main` de **Intranet-API** o **Intranet-FrontEnd** corre su `.github
 
 El servidor no compila nada: solo baja imágenes, igual que el resto de los proyectos en `/opt/docker`.
 
+## Entorno de prueba (rama `dev`)
+
+Los pushes a `dev` hacen lo mismo pero en un segundo stack, para probar antes de pasar a `main`:
+
+| | Producción | Prueba |
+|---|---|---|
+| Rama | `main` | `dev` |
+| Carpeta | `/opt/docker/intranet` | `/opt/docker/intranet-dev` |
+| Imágenes | `:latest` | `:dev` |
+| Contenedores | `intranet-api`, `intranet-web` | `intranet-dev-api`, `intranet-dev-web` |
+
+Usan el mismo `docker-compose.yml`; lo que distingue a cada uno es su `.env`
+(ver `deploy/.env.example`). La carpeta de prueba lleva los mismos archivos que la de
+producción (`api.env`, `api-files/`, `organigrama/`). Si su `api.env` apunta a la misma base
+que producción, agregarle `DISABLE_CRON=true` para que los procesos programados de la API
+(informes de Genoma) no corran dos veces.
+
 ## Archivos en el servidor
 
 | Ruta | En git | Qué es |
