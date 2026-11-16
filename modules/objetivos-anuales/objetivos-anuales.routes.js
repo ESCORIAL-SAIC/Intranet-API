@@ -118,6 +118,34 @@ router.get("/objetivos-anuales", requireAuth, async(req, res) => {
     }
 });
 
+// GET: nómina de empleados activos para el alta de un registro (busca por nombre o legajo).
+// Va antes de /objetivos-anuales/:id para que "empleados" no se tome como un id.
+router.get("/objetivos-anuales/empleados", requireAuth, async(req, res) => {
+    try {
+        if (!(await requireAdminObjetivos(req, res))) return;
+        const busqueda = (req.query.q || '').trim();
+        if (busqueda.length < 2) return res.json([]);
+
+        const allDatas = await pool.query(`
+            SELECT
+                e.id AS empleado_id,
+                e.descripcion AS empleado,
+                puesto.nombre AS puesto
+            FROM empleado e
+            LEFT JOIN ud_empleado ude ON ude.id = e.boextension_id
+            LEFT JOIN ud_puestoorganigrama puesto ON ude.puestoorganigrama_id = puesto.id
+            WHERE e.activestatus = 0
+            AND e.descripcion ILIKE $1
+            ORDER BY e.descripcion ASC
+            LIMIT 50
+        `, [`%${busqueda}%`]);
+        res.json(allDatas.rows);
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({ error: "Error buscando empleados" });
+    }
+});
+
 // GET: detalle de un registro + sus pilares
 router.get("/objetivos-anuales/:id", requireAuth, async(req, res) => {
     try {
