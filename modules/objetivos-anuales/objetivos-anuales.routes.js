@@ -179,16 +179,20 @@ router.get("/objetivos-anuales/:id", requireAuth, async(req, res) => {
     }
 });
 
-// POST: crear un registro (ciclo anual de un empleado) con sus pilares, en borrador
+// POST: crear registros (ciclo anual) en borrador con la misma definición de pilares para
+// uno o varios empleados. Acepta empleado_ids (array) o empleado_id (un solo empleado).
+// Todo va en una transacción: si algún empleado ya tiene registro en ese año no se crea ninguno.
 router.post("/objetivos-anuales", requireAuth, async(req, res) => {
+    let client;
     try {
         if (!(await requireAdminObjetivos(req, res))) return;
 
-        const { empleado_id, anio, evaluador, pilares } = req.body;
+        const { empleado_id, empleado_ids, anio, evaluador, pilares } = req.body;
         const username = req.user.username;
+        const ids = [...new Set((Array.isArray(empleado_ids) ? empleado_ids : [empleado_id]).filter(Boolean).map(String))];
 
-        if (!empleado_id || !anio) {
-            return res.status(400).json({ error: "empleado_id y anio son requeridos" });
+        if (ids.length === 0 || !anio) {
+            return res.status(400).json({ error: "Seleccioná al menos un empleado y el año" });
         }
         if (!Array.isArray(pilares) || pilares.length === 0) {
             return res.status(400).json({ error: "Debe cargar al menos un pilar" });
@@ -203,52 +207,70 @@ router.post("/objetivos-anuales", requireAuth, async(req, res) => {
             return res.status(400).json({ error: "La suma de los pesos de los pilares debe ser 100" });
         }
 
-        const empleadoData = await pool.query(`
-            SELECT puesto.nombre AS puesto
+        const existentes = await pool.query(`
+            SELECT emp.descripcion AS empleado
+            FROM web.registro_objetivo_anual r
+            JOIN empleado emp ON emp.id::text = r.empleado_id::text
+            WHERE r.anio = $1 AND r.empleado_id::text = ANY($2::text[])
+            ORDER BY emp.descripcion
+        `, [anio, ids]);
+        if (existentes.rows.length > 0) {
+            return res.status(409).json({
+                error: `Ya existe un registro de objetivos ${anio} para: ${existentes.rows.map(r => r.empleado).join(', ')}`,
+            });
+        }
+
+        const empleadosData = await pool.query(`
+            SELECT emp.id::text AS empleado_id, puesto.nombre AS puesto
             FROM empleado emp
             LEFT JOIN ud_empleado ude ON ude.id = emp.boextension_id
             LEFT JOIN ud_puestoorganigrama puesto ON ude.puestoorganigrama_id = puesto.id
-            WHERE emp.id = $1
-        `, [empleado_id]);
-        const puestoSnapshot = empleadoData.rows[0] ? empleadoData.rows[0].puesto : null;
+            WHERE emp.id::text = ANY($1::text[])
+        `, [ids]);
+        const puestoPorEmpleado = new Map(empleadosData.rows.map(r => [r.empleado_id, r.puesto]));
+        if (puestoPorEmpleado.size !== ids.length) {
+            return res.status(400).json({ error: "Alguno de los empleados seleccionados no existe" });
+        }
 
-        const registroId = require('crypto').randomUUID();
-        let registroResult;
-        try {
-            registroResult = await pool.query(
+        client = await pool.connect();
+        await client.query('BEGIN');
+        const registros = [];
+        for (const id of ids) {
+            const registroId = require('crypto').randomUUID();
+            const registroResult = await client.query(
                 `INSERT INTO web.registro_objetivo_anual
                  (id, empleado_id, anio, puesto_snapshot, evaluador, estado, creado_por, fecha_creacion)
                  VALUES ($1, $2, $3, $4, $5, 'borrador', $6, NOW()) RETURNING *`,
-                [registroId, empleado_id, anio, puestoSnapshot, evaluador || null, username]
+                [registroId, id, anio, puestoPorEmpleado.get(id), evaluador || null, username]
             );
-        } catch (err) {
-            if (err.code === '23505') {
-                return res.status(409).json({ error: "Ya existe un registro de objetivos anuales para ese empleado en ese año" });
+            for (let i = 0; i < pilares.length; i++) {
+                const p = pilares[i];
+                await client.query(
+                    `INSERT INTO web.objetivo_anual_pilar
+                     (id, registro_id, orden, nombre, descripcion, peso, unidad, direccion,
+                      umbral_score1, umbral_score2, umbral_score3, umbral_score4, umbral_score5)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+                    [
+                        require('crypto').randomUUID(), registroId, i,
+                        p.nombre, p.descripcion || null, p.peso, p.unidad || null, p.direccion,
+                        p.umbral_score1, p.umbral_score2, p.umbral_score3, p.umbral_score4, p.umbral_score5
+                    ]
+                );
             }
-            throw err;
+            registros.push(registroResult.rows[0]);
         }
+        await client.query('COMMIT');
 
-        const pilaresInsertados = [];
-        for (let i = 0; i < pilares.length; i++) {
-            const p = pilares[i];
-            const pilarResult = await pool.query(
-                `INSERT INTO web.objetivo_anual_pilar
-                 (id, registro_id, orden, nombre, descripcion, peso, unidad, direccion,
-                  umbral_score1, umbral_score2, umbral_score3, umbral_score4, umbral_score5)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
-                [
-                    require('crypto').randomUUID(), registroId, i,
-                    p.nombre, p.descripcion || null, p.peso, p.unidad || null, p.direccion,
-                    p.umbral_score1, p.umbral_score2, p.umbral_score3, p.umbral_score4, p.umbral_score5
-                ]
-            );
-            pilaresInsertados.push(pilarResult.rows[0]);
-        }
-
-        res.status(201).json({ registro: registroResult.rows[0], pilares: pilaresInsertados });
+        res.status(201).json({ registros, registro: registros[0] });
     } catch (err) {
+        if (client) await client.query('ROLLBACK').catch(() => {});
+        if (err.code === '23505') {
+            return res.status(409).json({ error: "Ya existe un registro de objetivos anuales para alguno de los empleados en ese año" });
+        }
         console.log(err);
         res.status(500).json({ error: "Error creando el registro de objetivos anuales" });
+    } finally {
+        if (client) client.release();
     }
 });
 
