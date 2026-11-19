@@ -90,6 +90,46 @@ async function disponibilidadSalas(emails, slot, ignorar = null) {
     return resultado;
 }
 
+// Agenda del día de cada sala (para mostrarla gráficamente al elegir sala):
+// { [email]: { ocupaciones: [{ inicio: 'HH:MM', fin: 'HH:MM', estado }], error } }.
+// Una ocupación que cruza la medianoche se recorta al día pedido. ignorar = { email, inicio, fin }
+// (fecha-hora completas, como en disponibilidadSalas): la reserva propia de la inducción no se muestra.
+async function agendaSalas(emails, fecha, ignorar = null) {
+    if (emails.length === 0) return {};
+    const siguiente = new Date(`${fecha}T12:00:00`);
+    siguiente.setDate(siguiente.getDate() + 1);
+    const finDia = `${siguiente.getFullYear()}-${pad(siguiente.getMonth() + 1)}-${pad(siguiente.getDate())}T00:00:00`;
+
+    const datos = await graph('POST', `/users/${encodeURIComponent(organizador())}/calendar/getSchedule`, {
+        schedules: emails,
+        startTime: { dateTime: `${fecha}T00:00:00`, timeZone: ZONA_HORARIA() },
+        endTime: { dateTime: finDia, timeZone: ZONA_HORARIA() },
+        availabilityViewInterval: 15,
+    }, { Prefer: `outlook.timezone="${ZONA_HORARIA()}"` });
+
+    const resultado = {};
+    for (const agenda of datos.value || []) {
+        const email = (agenda.scheduleId || '').toLowerCase();
+        if (agenda.error) { resultado[email] = { ocupaciones: [], error: agenda.error.message || 'Sin acceso a la agenda' }; continue; }
+        const ocupaciones = (agenda.scheduleItems || [])
+            .filter(item => item.status !== 'free')
+            .map(item => ({
+                inicioCompleto: item.start.dateTime.substring(0, 16) + ':00',
+                finCompleto: item.end.dateTime.substring(0, 16) + ':00',
+                estado: item.status,
+            }))
+            .filter(o => !(ignorar && ignorar.email === email && ignorar.inicio === o.inicioCompleto && ignorar.fin === o.finCompleto))
+            .map(o => ({
+                inicio: o.inicioCompleto < `${fecha}T00:00:00` ? '00:00' : o.inicioCompleto.substring(11, 16),
+                fin: o.finCompleto >= finDia ? '24:00' : o.finCompleto.substring(11, 16),
+                estado: o.estado,
+            }))
+            .sort((a, b) => a.inicio.localeCompare(b.inicio));
+        resultado[email] = { ocupaciones, error: null };
+    }
+    return resultado;
+}
+
 /* ===================================== EVENTOS ===================================== */
 
 function escaparHtml(texto) {
@@ -193,4 +233,4 @@ async function sincronizarItem(roadmap, item) {
     };
 }
 
-module.exports = { teamsHabilitado, listarSalas, disponibilidadSalas, calcularSlot, sincronizarItem, cancelarEvento };
+module.exports = { teamsHabilitado, listarSalas, disponibilidadSalas, agendaSalas, calcularSlot, sincronizarItem, cancelarEvento };

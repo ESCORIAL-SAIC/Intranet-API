@@ -449,21 +449,34 @@ router.get("/induccion/salas/disponibilidad", requireAuth, async(req, res) => {
         }
         const salas = await teams.listarSalas();
         const { fecha, horario, duracion, item_id } = req.query;
-        if (!fecha || !horario) {
-            return res.json({ habilitado: true, salas: salas.map(s => ({ ...s, disponible: null })) });
+        if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+            return res.json({ habilitado: true, salas: salas.map(s => ({ ...s, disponible: null, ocupaciones: null })) });
         }
 
-        const slot = teams.calcularSlot(fecha, horario, duracion);
         let ignorar = null;
         if (item_id) {
             const itemData = await pool.query("SELECT teams_sync FROM web.induccion_roadmap_item WHERE id = $1", [item_id]);
             const sync = itemData.rows[0] && itemData.rows[0].teams_sync;
             if (sync && sync.sala_reservada) ignorar = { email: sync.sala_email, inicio: sync.inicio, fin: sync.fin };
         }
-        const disponibilidad = await teams.disponibilidadSalas(salas.map(s => s.email), slot, ignorar);
+
+        // Una sola consulta del día completo: sirve para la agenda gráfica y para la disponibilidad
+        // en el horario de la inducción (si ya está cargado).
+        const agenda = await teams.agendaSalas(salas.map(s => s.email), fecha, ignorar);
+        let desde = null, hasta = null;
+        if (horario && /^\d{2}:\d{2}$/.test(horario)) {
+            const slot = teams.calcularSlot(fecha, horario, duracion);
+            desde = slot.inicio.substring(11, 16);
+            hasta = slot.fin.substring(0, 10) === fecha ? slot.fin.substring(11, 16) : '24:00';
+        }
         res.json({
             habilitado: true,
-            salas: salas.map(s => ({ ...s, disponible: disponibilidad[s.email] === undefined ? null : disponibilidad[s.email] })),
+            salas: salas.map(s => {
+                const a = agenda[s.email];
+                if (!a || a.error) return { ...s, disponible: null, ocupaciones: null };
+                const disponible = desde ? !a.ocupaciones.some(o => o.inicio < hasta && o.fin > desde) : null;
+                return { ...s, disponible, ocupaciones: a.ocupaciones };
+            }),
         });
     } catch (err) {
         console.log(err);
