@@ -5,6 +5,28 @@ const { perteneceGrupo } = require("../../shared/grupos");
 
 const router = express.Router();
 
+// Preguntas que solo se muestran cuando el evaluado es mando medio o superior.
+// Las preguntas se cargan en el ERP (itemsolicitud) y no tienen un campo para
+// marcarlas, así que se restringen acá por id (pregunta_id de
+// web.v_intranet_eval_desemp_pre_res).
+const PREGUNTAS_SOLO_MANDOS = new Set([
+    "20511ba5-70e4-4c1e-ace5-41d6c7e513db", // Pensamiento Estratégico - 2do Semestre 2026
+]);
+
+// Mando medio o superior según el nombre del puesto en el organigrama:
+// Jefe, Gerente, Director/a, Presidente y Vice Presidente.
+const REGEX_PUESTO_MANDO = /\b(jef[ea]|gerente|director[a]?|presidente)\b/i;
+
+async function esMandoMedioOSuperior(username) {
+    const result = await pool.query(`
+        SELECT puesto.nombre AS puesto
+        FROM ud_empleado ude
+        LEFT JOIN ud_puestoorganigrama puesto ON ude.puestoorganigrama_id = puesto.id
+        WHERE ude.usuario_sistema = $1
+    `, [username]);
+    return result.rows.some(r => r.puesto && REGEX_PUESTO_MANDO.test(r.puesto));
+}
+
 router.get("/evaluacion", requireAuth, async (req, res) => {
     try{
         const allDatas = await pool.query("select qa.cuestionario_id, qa.tipo, qa.fechadesde, qa.fechahasta from web.v_intranet_eval_desemp_pre_res qa where not exists (select 1 from web.intranet_registro_eval_desemp qb where qb.cuestionario_id = qa.cuestionario_id and qb.usuario = $1) group by 1,2,3,4", [req.user.username]);
@@ -98,8 +120,17 @@ router.get("/evaluacion-desempenio-det", requireAuth, async(req, res) => {
         let respuestas = []
         let preguntaN = ""
         let autoEvaluacion = (req.user.username == req.headers.usuario)
-        allDatas.rows.forEach(row => {
-            if(row == allDatas.rows[0]){
+
+        let rows = allDatas.rows
+        if (rows.some(r => PREGUNTAS_SOLO_MANDOS.has(r.pregunta_id))) {
+            const esMando = await esMandoMedioOSuperior(req.headers.usuario)
+            if (!esMando) {
+                rows = rows.filter(r => !PREGUNTAS_SOLO_MANDOS.has(r.pregunta_id))
+            }
+        }
+
+        rows.forEach(row => {
+            if(row == rows[0]){
                 cuestionarioId = row.cuestionario_id
                 preguntaId = row.pregunta_id
             }

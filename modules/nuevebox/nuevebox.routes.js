@@ -2,49 +2,12 @@ const express = require("express");
 const { pool } = require("../../config/db");
 const requireAuth = require("../../middleware/requireAuth");
 const { getOpenAIClient } = require("../../config/openai");
-const { obtenerGerenciaDelUsuario } = require("../../shared/organigrama");
+const { obtenerGerenciaDelUsuario, obtenerReportesDirectos } = require("../../shared/organigrama");
+const { ANTIGUEDAD_MINIMA_MESES_9BOX, tieneAntiguedadInsuficiente, evaluarHabilitacion9box } = require("../../shared/talento");
 
 const router = express.Router();
 
 /* MATRIZ 9-BOX */
-
-// Función auxiliar: Obtener reportes directos del usuario (1 nivel jerárquico abajo via puestodependencia)
-async function obtenerReportesDirectos(username) {
-    try {
-        const result = await pool.query(`
-            SELECT
-                e.id,
-                e.descripcion as nombre,
-                e.sector_id,
-                s.nombre as sector_nombre,
-                e.gerencia_id,
-                g.nombre as gerencia_nombre,
-                puesto.nombre as puesto,
-                e.fechaingreso as tenure_date,
-                (
-                    EXTRACT(YEAR FROM AGE(NOW(), TO_DATE(e.fechaingreso, 'YYYYMMDD'))) * 12
-                    + EXTRACT(MONTH FROM AGE(NOW(), TO_DATE(e.fechaingreso, 'YYYYMMDD')))
-                )::numeric AS tenure_months
-            FROM empleado e
-            LEFT JOIN ud_empleado ude ON ude.id = e.boextension_id
-            LEFT JOIN gerencia g ON g.id = e.gerencia_id
-            LEFT JOIN sector s ON s.id = e.sector_id
-            LEFT JOIN ud_puestoorganigrama puesto ON ude.puestoorganigrama_id = puesto.id
-            WHERE puesto.dependencia_id  = (
-                SELECT puesto1.id FROM ud_empleado udemp1
-                LEFT JOIN ud_puestoorganigrama puesto1 ON udemp1.puestoorganigrama_id = puesto1.id
-                WHERE usuario_sistema = $1
-            )
-            AND e.activestatus = 0
-            ORDER BY e.descripcion ASC
-        `, [username]);
-
-        return result.rows;
-    } catch (err) {
-        console.log('Error obtener reportes directos:', err);
-        return [];
-    }
-}
 
 // GET: Obtener listado de registros 9-box (propios + subordinados en lectura)
 router.get("/nuevebox", requireAuth, async(req, res) => {
@@ -306,15 +269,6 @@ function clamp(valor, min, max, porDefecto) {
     return Math.min(max, Math.max(min, n));
 }
 
-// No se evalúa (ni con IA ni manualmente) a colaboradores con esta antigüedad o menos:
-// no hay historial suficiente de desempeño/potencial para ubicarlos en una caja.
-const ANTIGUEDAD_MINIMA_MESES_9BOX = 6;
-
-function tieneAntiguedadInsuficiente(tenureMonths) {
-    const meses = Number(tenureMonths);
-    return Number.isFinite(meses) && meses <= ANTIGUEDAD_MINIMA_MESES_9BOX;
-}
-
 // Rangos de referencia con respaldo de benchmark (ver info-prompts/distribucion-9box-referencia.html).
 // Sirven solo para generar una alerta informativa al calibrar un registro, nunca para bloquear la carga.
 const BENCHMARK_BLOQUES_9BOX = [
@@ -443,6 +397,13 @@ router.post("/nuevebox", requireAuth, async(req, res) => {
         const infoUsuario = await obtenerGerenciaDelUsuario(username);
         if (!infoUsuario) {
             return res.status(403).json({ error: "No se puede determinar la gerencia/sector del usuario" });
+        }
+
+        // Paso previo del Talent Review: sin Guía de Potencial + Riesgo e Impacto finalizados
+        // para todo el equipo no se puede armar la matriz.
+        const habilitacion = await evaluarHabilitacion9box(await obtenerReportesDirectos(username));
+        if (!habilitacion.habilitado) {
+            return res.status(409).json({ error: habilitacion.motivo, habilitacion });
         }
 
         const registroId = require('crypto').randomUUID();

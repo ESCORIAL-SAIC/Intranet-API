@@ -14,7 +14,9 @@ async function perteneceGrupo(e) {
     try {
         const grupos = e.grupousuario.split(',');
         const placeholders = grupos.map((_, index) => `${_}`).join(',');
-        const allDatas = await pool.query(`select * from web.v_intranet_usuarios_grupos where usuario = $1 and grupo in (${placeholders})`, [e.username]);
+        // TRIM: en el ERP hay grupos cargados con espacios al final
+        // (ej. 'rol_estructura_producto_costo '), que con la comparación exacta no matcheaban
+        const allDatas = await pool.query(`select * from web.v_intranet_usuarios_grupos where usuario = $1 and TRIM(grupo) in (${placeholders})`, [e.username]);
 
         if (allDatas.rows.length > 0) {
             return true

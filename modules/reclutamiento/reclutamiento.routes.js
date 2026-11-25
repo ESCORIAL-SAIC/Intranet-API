@@ -5,6 +5,7 @@ const { parse } = require('csv-parse/sync');
 const PdfReader = require('pdfreader').PdfReader;
 const { pool } = require("../../config/db");
 const requireAuth = require("../../middleware/requireAuth");
+const { perteneceGrupo } = require("../../shared/grupos");
 const { getOpenAIClient } = require("../../config/openai");
 const { parsePdfBuffer } = require("../../shared/pdf");
 
@@ -107,7 +108,14 @@ router.get("/requerimiento-personal", requireAuth, async(req, res) => {
     }
 })
 
+// Organigrama de la gerencia del usuario (solapa OrganigramaGer del front).
+// Devuelve sueldos, así que además del login exige el rol de gerencia.
 router.get('/organigrama', requireAuth, async(req, res) => {
+  const autorizado = await perteneceGrupo({ username: req.user.username, grupousuario: "'rol_gerencia_organigrama'" });
+  if (!autorizado) {
+    return res.status(403).json({ error: 'Acceso exclusivo para gerencias' });
+  }
+
   //const { gerencia, format } = req.query;
   const gerencia = await buscaGerencia(req.user.username)
   if (!gerencia) {
@@ -117,8 +125,10 @@ router.get('/organigrama', requireAuth, async(req, res) => {
   try {
     console.log(`[ORGANIGRAMA] Iniciando búsqueda para gerencia: ${gerencia}`);
 
-    // Leer el CSV maestro desde el servidor
-    const csvPath = path.join(__dirname, '../../data/organigrama_completo.csv');
+    // CSV maestro con sueldos (el mismo organigramaAdm.csv que usa el front).
+    // No está en git: en producción se monta desde la carpeta organigrama/ del
+    // servidor (ORGANIGRAMA_CSV); en desarrollo va en data/organigramaAdm.csv.
+    const csvPath = process.env.ORGANIGRAMA_CSV || path.join(__dirname, '../../data/organigramaAdm.csv');
     console.log(`[ORGANIGRAMA] Ruta CSV: ${csvPath}`);
 
     if (!fs.existsSync(csvPath)) {

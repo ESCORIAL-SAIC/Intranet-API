@@ -1,0 +1,121 @@
+# Build y deploy de la API.
+#
+# build:  en GitHub, construye la imagen y la publica en GHCR
+#         (ghcr.io/escorial-saic/intranet-api:latest y :<sha>).
+# deploy: en el runner self-hosted del servidor (etiqueta "intranet"), actualiza
+#         /opt/docker/intranet/docker-compose.yml desde deploy/, baja la imagen nueva
+#         y reinicia solo el contenedor "api". Si no queda healthy, vuelve a la anterior.
+
+name: Deploy API
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/escorial-saic/intranet-api
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login a ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build y push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: [ self-hosted, Linux, intranet ]
+    concurrency:
+      group: deploy-api
+      cancel-in-progress: false
+    env:
+      STACK_DIR: /opt/docker/intranet
+      SERVICE: api
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy
+
+      - name: Validar servidor
+        run: |
+          set -euo pipefail
+          test -d "$STACK_DIR"           || { echo "::error::No existe $STACK_DIR"; exit 1; }
+          test -w "$STACK_DIR"           || { echo "::error::El runner no puede escribir en $STACK_DIR"; exit 1; }
+          test -f "$STACK_DIR/api.env"   || { echo "::error::Falta $STACK_DIR/api.env"; exit 1; }
+          test -d "$STACK_DIR/api-files" || { echo "::error::Falta $STACK_DIR/api-files"; exit 1; }
+          docker version --format 'Docker {{.Server.Version}}'
+
+      - name: Actualizar docker-compose.yml del servidor
+        run: install -m 644 deploy/docker-compose.yml "$STACK_DIR/docker-compose.yml"
+
+      - name: Login a ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Bajar y levantar la version nueva
+        working-directory: ${{ env.STACK_DIR }}
+        run: |
+          set -euo pipefail
+          # Imagen que esta corriendo ahora, para el rollback
+          prev=$(docker inspect -f '{{.Image}}' "$(docker compose ps -q "$SERVICE")" 2>/dev/null || true)
+          echo "PREV_IMAGE=$prev" >> "$GITHUB_ENV"
+          docker compose pull "$SERVICE"
+          docker compose up -d --no-deps "$SERVICE"
+
+      - name: Esperar healthcheck (rollback si falla)
+        working-directory: ${{ env.STACK_DIR }}
+        run: |
+          set -uo pipefail
+          deadline=$((SECONDS + 150))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status=$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q "$SERVICE")" 2>/dev/null || echo unknown)
+            echo "Estado: $status"
+            case "$status" in
+              healthy) exit 0 ;;
+              unhealthy) break ;;
+            esac
+            sleep 5
+          done
+          echo "::error::$SERVICE no quedo healthy, vuelvo a la version anterior"
+          docker compose logs --tail 100 "$SERVICE"
+          if [ -n "$PREV_IMAGE" ]; then
+            docker tag "$PREV_IMAGE" "$(docker compose config --images "$SERVICE")"
+            docker compose up -d --no-deps --pull never "$SERVICE"
+          fi
+          exit 1
+
+      - name: Logout y limpieza
+        if: always()
+        run: |
+          docker logout ghcr.io || true
+          docker image prune -f
