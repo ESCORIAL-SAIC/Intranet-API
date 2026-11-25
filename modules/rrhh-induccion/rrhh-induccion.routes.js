@@ -127,7 +127,33 @@ async function obtenerItems(roadmapId, client = pool) {
     return result.rows;
 }
 
+// Una inducción de un roadmap publicado se da por completada cuando termina su reunión
+// (fecha + horario + duración; sin horario, al terminar el día). No toca las que RRHH ya marcó
+// o desmarcó a mano (completada_por con valor). Sin roadmapId revisa todos los roadmaps.
+const COMPLETADA_POR_AUTOMATICO = 'automatico';
+
+async function completarInduccionesPasadas(roadmapId = null) {
+    const result = await pool.query(`
+        UPDATE web.induccion_roadmap_item i
+        SET completada = true,
+            fecha_completada = i.fecha + COALESCE(i.horario, TIME '23:59') + make_interval(mins => COALESCE(i.duracion_min, 30)),
+            completada_por = $1
+        FROM web.induccion_roadmap r
+        WHERE r.id = i.roadmap_id
+          AND r.estado <> 'borrador'
+          AND ($2::text IS NULL OR r.id::text = $2::text)
+          AND NOT i.completada
+          AND i.completada_por IS NULL
+          AND i.fecha IS NOT NULL
+          AND i.fecha + COALESCE(i.horario, TIME '23:59') + make_interval(mins => COALESCE(i.duracion_min, 30)) <= LOCALTIMESTAMP
+        RETURNING i.roadmap_id
+    `, [COMPLETADA_POR_AUTOMATICO, roadmapId]);
+    const roadmaps = [...new Set(result.rows.map(r => r.roadmap_id))];
+    for (const id of roadmaps) await actualizarEstadoFinal(id);
+}
+
 async function obtenerRoadmapCompleto(roadmapId) {
+    await completarInduccionesPasadas(roadmapId);
     // fecha_ingreso se pisa como texto 'YYYY-MM-DD' (pg arma la fila por orden de columnas).
     const result = await pool.query(
         "SELECT *, TO_CHAR(fecha_ingreso, 'YYYY-MM-DD') AS fecha_ingreso FROM web.induccion_roadmap WHERE id = $1",
@@ -228,7 +254,9 @@ async function guardarItems(client, roadmapId, items) {
         if (item.id && idsExistentes.has(item.id)) {
             await client.query(`
                 UPDATE web.induccion_roadmap_item
-                SET orden = $1, nombre = $2, fecha = $3, horario = $4, duracion_min = $5, ubicacion = $6,
+                SET completada_por = CASE WHEN NOT completada AND (fecha IS DISTINCT FROM $3::date OR horario IS DISTINCT FROM $4::time)
+                                          THEN NULL ELSE completada_por END,
+                    orden = $1, nombre = $2, fecha = $3, horario = $4, duracion_min = $5, ubicacion = $6,
                     facilitador = $7, material_url = $8, observaciones = $10, sala_email = $11, sala_nombre = $12,
                     evaluacion_completada  = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_completada ELSE false END,
                     evaluacion_fecha       = CASE WHEN evaluacion_tipo IS NOT DISTINCT FROM $9::varchar THEN evaluacion_fecha END,
@@ -489,6 +517,7 @@ router.get("/induccion/salas/disponibilidad", requireAuth, async(req, res) => {
 router.get("/induccion/roadmaps", requireAuth, async(req, res) => {
     try {
         if (!(await requireRRHH(req, res))) return;
+        await completarInduccionesPasadas();
         const roadmapsData = await pool.query(`
             SELECT
                 r.id, r.empleado_id, r.tipo, r.nombre_snapshot, r.legajo_snapshot, r.puesto_snapshot,
@@ -687,12 +716,13 @@ router.put("/induccion/items/:id/completada", requireAuth, async(req, res) => {
             return res.status(400).json({ error: "Publicá el roadmap antes de registrar inducciones completadas" });
         }
 
+        // Al desmarcar se guarda quién lo hizo, para que no vuelva a completarse sola por la fecha.
         const completada = !!req.body.completada;
         await pool.query(`
             UPDATE web.induccion_roadmap_item
             SET completada = $1,
                 fecha_completada = CASE WHEN $1 THEN NOW() END,
-                completada_por = CASE WHEN $1 THEN $2 END
+                completada_por = $2
             WHERE id = $3
         `, [completada, req.user.username, item.id]);
         await actualizarEstadoFinal(item.roadmap_id);
