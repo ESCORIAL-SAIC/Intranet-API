@@ -11,7 +11,11 @@ router.post("/login",
     (req, res) => {
         pool.query("select id, username, password from web.v_intranet_usuarios where username = $1", [req.body.username], (err, results)=>{
             if(err){
-                throw err;
+                console.error("Error en /login:", err);
+                return res.status(500).send({
+                    success: false,
+                    message: "Error interno al iniciar sesión"
+                })
             }
 
             if (results.rows.length > 0){
