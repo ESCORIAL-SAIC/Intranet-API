@@ -36,6 +36,7 @@ app.use(require('./modules/genoma/genoma.routes'));
 app.use(require('./modules/cvs/cvs.routes'));
 app.use(require('./modules/chat-agentes/chat-agentes.routes'));
 app.use(require('./modules/estructura-productos/estructura-productos.routes'));
+app.use(require('./modules/admin-accesos/admin-accesos.routes'));
 
 /* PUERTO */
 
